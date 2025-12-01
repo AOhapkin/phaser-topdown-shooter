@@ -3,6 +3,8 @@ import { Player } from "../entities/Player";
 import { Bullet } from "../entities/Bullet";
 import { Enemy, EnemyType } from "../entities/Enemy";
 import { LootPickup, LootType } from "../entities/LootPickup";
+import { Weapon } from "../weapons/Weapon";
+import { BasicGun } from "../weapons/BasicGun";
 
 import playerSvg from "../assets/player.svg?url";
 import enemySvg from "../assets/enemy.svg?url";
@@ -24,8 +26,9 @@ export class GameScene extends Phaser.Scene {
   private bullets!: Phaser.Physics.Arcade.Group;
   private enemies!: Phaser.Physics.Arcade.Group;
 
-  private lastShotTime = 0;
   private fireRate = 150; // мс между выстрелами
+  private bulletCount = 1;
+  private bulletSpread = 0.15;
 
   private score = 0;
   private scoreText!: Phaser.GameObjects.Text;
@@ -44,6 +47,7 @@ export class GameScene extends Phaser.Scene {
   private spawnEvent?: Phaser.Time.TimerEvent;
   private restartKey!: Phaser.Input.Keyboard.Key;
   private loot!: Phaser.Physics.Arcade.Group;
+  private weapon!: Weapon;
 
   constructor() {
     super("GameScene");
@@ -53,6 +57,14 @@ export class GameScene extends Phaser.Scene {
     this.load.svg("player", playerSvg, { width: 32, height: 32 });
     this.load.svg("enemy", enemySvg, { width: 28, height: 28 });
     this.load.svg("bullet", bulletSvg, { width: 8, height: 8 });
+    this.load.svg("loot-heal", "src/assets/heal.svg", {
+      width: 32,
+      height: 32,
+    });
+    this.load.svg("loot-speed", "src/assets/speed.svg", {
+      width: 32,
+      height: 32,
+    });
   }
 
   create() {
@@ -64,6 +76,8 @@ export class GameScene extends Phaser.Scene {
 
     // Сбрасываем параметры сложности / стрельбы
     this.fireRate = 150;
+    this.bulletCount = 1;
+    this.bulletSpread = 0.15;
     this.baseSpawnDelay = 1000;
     this.currentSpawnDelay = this.baseSpawnDelay;
 
@@ -82,6 +96,13 @@ export class GameScene extends Phaser.Scene {
     this.bullets = this.physics.add.group({
       classType: Bullet,
       runChildUpdate: false,
+    });
+
+    // Оружие
+    this.weapon = new BasicGun({
+      fireRate: this.fireRate,
+      bulletCount: this.bulletCount,
+      bulletSpread: this.bulletSpread,
     });
 
     // Группа врагов
@@ -174,34 +195,13 @@ export class GameScene extends Phaser.Scene {
     }
 
     const pointer = this.input.activePointer;
-
-    if (!pointer.isDown) {
-      return;
-    }
-
-    if (time < this.lastShotTime + this.fireRate) {
-      return;
-    }
-
-    const bullet = new Bullet(this, this.player.x, this.player.y);
-    this.bullets.add(bullet);
-
-    const angle = Phaser.Math.Angle.Between(
-      this.player.x,
-      this.player.y,
-      pointer.worldX,
-      pointer.worldY
-    );
-
-    const speed = bullet.speed;
-    const vx = Math.cos(angle) * speed;
-    const vy = Math.sin(angle) * speed;
-
-    const body = bullet.body as Phaser.Physics.Arcade.Body;
-    body.setVelocity(vx, vy);
-    body.setAllowGravity(false);
-
-    this.lastShotTime = time;
+    this.weapon.tryFire({
+      scene: this,
+      player: this.player,
+      bullets: this.bullets,
+      pointer,
+      time,
+    });
   }
 
   // Спавн врага по краям экрана
@@ -336,6 +336,22 @@ export class GameScene extends Phaser.Scene {
     this.currentSpawnDelay = Math.max(300, this.currentSpawnDelay - 100);
     this.updateSpawnTimer();
 
+    if (this.level >= 6) {
+      this.bulletCount = 3;
+      this.bulletSpread = 0.3;
+    } else if (this.level >= 3) {
+      this.bulletCount = 2;
+      this.bulletSpread = 0.2;
+    } else {
+      this.bulletCount = 1;
+      this.bulletSpread = 0.15;
+    }
+
+    if (this.weapon instanceof BasicGun) {
+      this.weapon.setFireRate(this.fireRate);
+      this.weapon.setPattern(this.bulletCount, this.bulletSpread);
+    }
+
     this.player.onLevelUp(this.level);
   }
 
@@ -363,7 +379,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private maybeDropLoot(x: number, y: number) {
-    const dropChance = 0.25;
+    const dropChance = 0.1;
     if (Math.random() > dropChance) {
       return;
     }
