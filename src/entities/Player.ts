@@ -1,4 +1,4 @@
-import Phaser from 'phaser';
+import Phaser from "phaser";
 
 type WASDKeys = {
   W: Phaser.Input.Keyboard.Key;
@@ -12,8 +12,12 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
   private wasd: WASDKeys;
   private speed = 220;
 
+  private maxHealth = 3;
+  private health = this.maxHealth;
+  private alive = true;
+
   constructor(scene: Phaser.Scene, x: number, y: number) {
-    super(scene, x, y, 'player');
+    super(scene, x, y, "player");
 
     scene.add.existing(this);
     scene.physics.add.existing(this);
@@ -34,9 +38,42 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
     };
   }
 
+  getHealth(): number {
+    return this.health;
+  }
+
+  getMaxHealth(): number {
+    return this.maxHealth;
+  }
+
+  isAlive(): boolean {
+    return this.alive;
+  }
+
+  takeDamage(amount: number): void {
+    if (!this.alive) {
+      return;
+    }
+
+    this.health = Math.max(0, this.health - amount);
+
+    if (this.health <= 0) {
+      this.alive = false;
+      const body = this.body as Phaser.Physics.Arcade.Body;
+      body.setVelocity(0, 0);
+    }
+  }
+
   update() {
     const body = this.body as Phaser.Physics.Arcade.Body;
-    if (!body) return;
+    if (!body) {
+      return;
+    }
+
+    if (!this.alive) {
+      body.setVelocity(0, 0);
+      return;
+    }
 
     let vx = 0;
     let vy = 0;
@@ -68,8 +105,12 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
 
     // Поворот к мыши
     const pointer = this.scene.input.activePointer;
-    const angle = Phaser.Math.Angle.Between(this.x, this.y, pointer.worldX, pointer.worldY);
+    const angle = Phaser.Math.Angle.Between(
+      this.x,
+      this.y,
+      pointer.worldX,
+      pointer.worldY
+    );
     this.setRotation(angle);
   }
 }
-

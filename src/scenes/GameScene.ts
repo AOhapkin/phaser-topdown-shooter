@@ -1,11 +1,11 @@
-import Phaser from 'phaser';
-import { Player } from '../entities/Player';
-import { Bullet } from '../entities/Bullet';
-import { Enemy } from '../entities/Enemy';
+import Phaser from "phaser";
+import { Player } from "../entities/Player";
+import { Bullet } from "../entities/Bullet";
+import { Enemy, EnemyType } from "../entities/Enemy";
 
-import playerSvg from '../assets/player.svg?url';
-import enemySvg from '../assets/enemy.svg?url';
-import bulletSvg from '../assets/bullet.svg?url';
+import playerSvg from "../assets/player.svg?url";
+import enemySvg from "../assets/enemy.svg?url";
+import bulletSvg from "../assets/bullet.svg?url";
 
 export class GameScene extends Phaser.Scene {
   private player!: Player;
@@ -15,18 +15,49 @@ export class GameScene extends Phaser.Scene {
   private lastShotTime = 0;
   private fireRate = 150; // мс между выстрелами
 
+  private score = 0;
+  private scoreText!: Phaser.GameObjects.Text;
+  private healthText!: Phaser.GameObjects.Text;
+
+  private level = 1;
+  private xp = 0;
+  private xpToNextLevel = 5;
+  private xpText!: Phaser.GameObjects.Text;
+
+  private gameOver = false;
+  private gameOverText?: Phaser.GameObjects.Text;
+
+  private baseSpawnDelay = 1000;
+  private currentSpawnDelay = 1000;
+  private spawnEvent?: Phaser.Time.TimerEvent;
+  private restartKey!: Phaser.Input.Keyboard.Key;
+
   constructor() {
-    super('GameScene');
+    super("GameScene");
   }
 
   preload() {
-    this.load.svg('player', playerSvg, { width: 32, height: 32 });
-    this.load.svg('enemy', enemySvg, { width: 28, height: 28 });
-    this.load.svg('bullet', bulletSvg, { width: 8, height: 8 });
+    this.load.svg("player", playerSvg, { width: 32, height: 32 });
+    this.load.svg("enemy", enemySvg, { width: 28, height: 28 });
+    this.load.svg("bullet", bulletSvg, { width: 8, height: 8 });
   }
 
   create() {
     const { width, height } = this.scale;
+
+    // Резюмим физику и сбрасываем флаг gameOver при каждом старте/рестарте сцены
+    this.physics.resume();
+    this.gameOver = false;
+
+    // Сбрасываем параметры сложности / стрельбы
+    this.fireRate = 150;
+    this.baseSpawnDelay = 1000;
+    this.currentSpawnDelay = this.baseSpawnDelay;
+
+    // Клавиша рестарта
+    this.restartKey = this.input.keyboard!.addKey(
+      Phaser.Input.Keyboard.KeyCodes.R
+    );
 
     // Игрок
     this.player = new Player(this, width / 2, height / 2);
@@ -50,7 +81,8 @@ export class GameScene extends Phaser.Scene {
     this.physics.add.overlap(
       this.bullets,
       this.enemies,
-      this.handleBulletHitEnemy as Phaser.Types.Physics.Arcade.ArcadePhysicsCallback,
+      this
+        .handleBulletHitEnemy as Phaser.Types.Physics.Arcade.ArcadePhysicsCallback,
       undefined,
       this
     );
@@ -58,21 +90,49 @@ export class GameScene extends Phaser.Scene {
     this.physics.add.overlap(
       this.player,
       this.enemies,
-      this.handleEnemyHitPlayer as Phaser.Types.Physics.Arcade.ArcadePhysicsCallback,
+      this
+        .handleEnemyHitPlayer as Phaser.Types.Physics.Arcade.ArcadePhysicsCallback,
       undefined,
       this
     );
 
-    // Таймер спавна врагов
-    this.time.addEvent({
-      delay: 1000,
-      loop: true,
-      callback: this.spawnEnemy,
-      callbackScope: this,
+    // UI: score и здоровье
+    this.score = 0;
+    this.scoreText = this.add.text(16, 16, "Score: 0", {
+      fontSize: "18px",
+      color: "#ffffff",
     });
+
+    this.healthText = this.add.text(width - 16, 16, "", {
+      fontSize: "18px",
+      color: "#ffffff",
+    });
+    this.healthText.setOrigin(1, 0);
+    this.updateHealthText();
+
+    // XP / уровень
+    this.level = 1;
+    this.xp = 0;
+    this.xpToNextLevel = 5;
+
+    this.xpText = this.add.text(16, 40, "", {
+      fontSize: "16px",
+      color: "#ffffff",
+    });
+    this.updateXPText();
+
+    // Таймер спавна врагов
+    this.updateSpawnTimer();
   }
 
   update(time: number) {
+    if (this.gameOver) {
+      if (Phaser.Input.Keyboard.JustDown(this.restartKey)) {
+        this.scene.restart();
+      }
+      return;
+    }
+
     if (this.player) {
       this.player.update();
     }
@@ -82,6 +142,10 @@ export class GameScene extends Phaser.Scene {
 
   // ЛКМ → выстрел в сторону курсора
   private handleShooting(time: number) {
+    if (this.gameOver || !this.player.isAlive()) {
+      return;
+    }
+
     const pointer = this.input.activePointer;
 
     if (!pointer.isDown) {
@@ -115,6 +179,10 @@ export class GameScene extends Phaser.Scene {
 
   // Спавн врага по краям экрана
   private spawnEnemy() {
+    if (this.gameOver || !this.player.isAlive()) {
+      return;
+    }
+
     const { width, height } = this.scale;
 
     // Случайная сторона: 0 = сверху, 1 = снизу, 2 = слева, 3 = справа
@@ -141,34 +209,137 @@ export class GameScene extends Phaser.Scene {
         break;
     }
 
-    const enemy = new Enemy(this, x, y, this.player);
+    const roll = Phaser.Math.Between(1, 100);
+    const type: EnemyType = roll <= 70 ? "runner" : "tank";
+
+    const enemy = new Enemy(this, x, y, this.player, type);
     this.enemies.add(enemy);
   }
 
   // Пуля попала во врага
   private handleBulletHitEnemy(
-    bulletObj: Phaser.Types.Physics.Arcade.GameObjectWithBody | Phaser.Tilemaps.Tile,
-    enemyObj: Phaser.Types.Physics.Arcade.GameObjectWithBody | Phaser.Tilemaps.Tile
+    bulletObj:
+      | Phaser.Types.Physics.Arcade.GameObjectWithBody
+      | Phaser.Tilemaps.Tile,
+    enemyObj:
+      | Phaser.Types.Physics.Arcade.GameObjectWithBody
+      | Phaser.Tilemaps.Tile
   ) {
     const bullet = bulletObj as Bullet;
     const enemy = enemyObj as Enemy;
 
     bullet.destroy();
-    enemy.destroy();
 
-    // Здесь потом добавим счет/XP
+    const killed = enemy.takeDamage(1);
+
+    if (killed) {
+      this.score += 1;
+      this.scoreText.setText(`Score: ${this.score}`);
+
+      this.addXP(1);
+    }
   }
 
   // Враг коснулся игрока
   private handleEnemyHitPlayer(
-    _playerObj: Phaser.Types.Physics.Arcade.GameObjectWithBody | Phaser.Tilemaps.Tile,
-    enemyObj: Phaser.Types.Physics.Arcade.GameObjectWithBody | Phaser.Tilemaps.Tile
+    _playerObj:
+      | Phaser.Types.Physics.Arcade.GameObjectWithBody
+      | Phaser.Tilemaps.Tile,
+    enemyObj:
+      | Phaser.Types.Physics.Arcade.GameObjectWithBody
+      | Phaser.Tilemaps.Tile
   ) {
     const enemy = enemyObj as Enemy;
     enemy.destroy();
 
-    console.log('Player hit by enemy!');
-    // Потом добавим HP, экран смерти и т.п.
+    this.player.takeDamage(1);
+    this.updateHealthText();
+
+    if (!this.player.isAlive()) {
+      this.handleGameOver();
+    }
+  }
+
+  private updateHealthText() {
+    const hp = this.player?.getHealth?.() ?? 0;
+    const maxHp = this.player?.getMaxHealth?.() ?? 0;
+    this.healthText.setText(`HP: ${hp}/${maxHp}`);
+  }
+
+  private addXP(amount: number) {
+    this.xp += amount;
+    this.checkLevelUp();
+    this.updateXPText();
+  }
+
+  private checkLevelUp() {
+    while (this.xp >= this.xpToNextLevel) {
+      this.xp -= this.xpToNextLevel;
+      this.level += 1;
+
+      this.xpToNextLevel = Math.floor(this.xpToNextLevel * 1.5);
+
+      this.onLevelUp();
+    }
+  }
+
+  private onLevelUp() {
+    // Бафф игрока: уменьшаем задержку между выстрелами
+    this.fireRate = Math.max(60, this.fireRate - 10);
+
+    // Усложняем игру: уменьшаем задержку спавна врагов
+    this.currentSpawnDelay = Math.max(300, this.currentSpawnDelay - 100);
+    this.updateSpawnTimer();
+  }
+
+  private updateXPText() {
+    this.xpText.setText(
+      `LVL: ${this.level}  XP: ${this.xp}/${this.xpToNextLevel}`
+    );
+  }
+
+  private updateSpawnTimer() {
+    if (this.gameOver) {
+      return;
+    }
+
+    if (this.spawnEvent) {
+      this.spawnEvent.remove(false);
+    }
+
+    this.spawnEvent = this.time.addEvent({
+      delay: this.currentSpawnDelay,
+      loop: true,
+      callback: this.spawnEnemy,
+      callbackScope: this,
+    });
+  }
+
+  private handleGameOver() {
+    if (this.gameOver) {
+      return;
+    }
+
+    this.gameOver = true;
+
+    if (this.spawnEvent) {
+      this.spawnEvent.remove(false);
+    }
+
+    this.physics.pause();
+
+    const { width, height } = this.scale;
+
+    this.gameOverText = this.add.text(
+      width / 2,
+      height / 2,
+      "GAME OVER\nPress R to restart",
+      {
+        fontSize: "32px",
+        color: "#ff5555",
+        align: "center",
+      }
+    );
+    this.gameOverText.setOrigin(0.5, 0.5);
   }
 }
-
