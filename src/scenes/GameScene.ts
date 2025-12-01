@@ -2,10 +2,22 @@ import Phaser from "phaser";
 import { Player } from "../entities/Player";
 import { Bullet } from "../entities/Bullet";
 import { Enemy, EnemyType } from "../entities/Enemy";
+import { LootPickup, LootType } from "../entities/LootPickup";
 
 import playerSvg from "../assets/player.svg?url";
 import enemySvg from "../assets/enemy.svg?url";
 import bulletSvg from "../assets/bullet.svg?url";
+
+type EnemyConfig = {
+  type: EnemyType;
+  minLevel: number;
+  weight: number;
+};
+
+const ENEMY_CONFIGS: EnemyConfig[] = [
+  { type: "runner", minLevel: 1, weight: 70 },
+  { type: "tank", minLevel: 3, weight: 30 },
+];
 
 export class GameScene extends Phaser.Scene {
   private player!: Player;
@@ -31,6 +43,7 @@ export class GameScene extends Phaser.Scene {
   private currentSpawnDelay = 1000;
   private spawnEvent?: Phaser.Time.TimerEvent;
   private restartKey!: Phaser.Input.Keyboard.Key;
+  private loot!: Phaser.Physics.Arcade.Group;
 
   constructor() {
     super("GameScene");
@@ -92,6 +105,20 @@ export class GameScene extends Phaser.Scene {
       this.enemies,
       this
         .handleEnemyHitPlayer as Phaser.Types.Physics.Arcade.ArcadePhysicsCallback,
+      undefined,
+      this
+    );
+
+    this.loot = this.physics.add.group({
+      classType: LootPickup,
+      runChildUpdate: false,
+    });
+
+    this.physics.add.overlap(
+      this.player,
+      this.loot,
+      this
+        .handlePlayerPickupLoot as Phaser.Types.Physics.Arcade.ArcadePhysicsCallback,
       undefined,
       this
     );
@@ -209,10 +236,29 @@ export class GameScene extends Phaser.Scene {
         break;
     }
 
-    const roll = Phaser.Math.Between(1, 100);
-    const type: EnemyType = roll <= 70 ? "runner" : "tank";
+    const availableConfigs = ENEMY_CONFIGS.filter(
+      (cfg) => cfg.minLevel <= this.level
+    );
+    if (availableConfigs.length === 0) {
+      return;
+    }
 
-    const enemy = new Enemy(this, x, y, this.player, type);
+    const totalWeight = availableConfigs.reduce(
+      (sum, cfg) => sum + cfg.weight,
+      0
+    );
+    let roll = Phaser.Math.Between(1, totalWeight);
+    let chosen = availableConfigs[0];
+
+    for (const cfg of availableConfigs) {
+      if (roll <= cfg.weight) {
+        chosen = cfg;
+        break;
+      }
+      roll -= cfg.weight;
+    }
+
+    const enemy = new Enemy(this, x, y, this.player, chosen.type);
     this.enemies.add(enemy);
   }
 
@@ -230,13 +276,14 @@ export class GameScene extends Phaser.Scene {
 
     bullet.destroy();
 
-    const killed = enemy.takeDamage(1);
+    const killed = enemy.takeDamage(this.player.getDamage());
 
     if (killed) {
       this.score += 1;
       this.scoreText.setText(`Score: ${this.score}`);
 
       this.addXP(1);
+      this.maybeDropLoot(enemy.x, enemy.y);
     }
   }
 
@@ -284,12 +331,12 @@ export class GameScene extends Phaser.Scene {
   }
 
   private onLevelUp() {
-    // Бафф игрока: уменьшаем задержку между выстрелами
     this.fireRate = Math.max(60, this.fireRate - 10);
 
-    // Усложняем игру: уменьшаем задержку спавна врагов
     this.currentSpawnDelay = Math.max(300, this.currentSpawnDelay - 100);
     this.updateSpawnTimer();
+
+    this.player.onLevelUp(this.level);
   }
 
   private updateXPText() {
@@ -313,6 +360,53 @@ export class GameScene extends Phaser.Scene {
       callback: this.spawnEnemy,
       callbackScope: this,
     });
+  }
+
+  private maybeDropLoot(x: number, y: number) {
+    const dropChance = 0.25;
+    if (Math.random() > dropChance) {
+      return;
+    }
+
+    const roll = Math.random();
+    let lootType: LootType = "heal";
+
+    if (roll < 0.5) {
+      lootType = "heal";
+    } else if (roll < 0.8) {
+      lootType = "speed";
+    } else {
+      lootType = "armor";
+    }
+
+    const loot = new LootPickup(this, x, y, lootType);
+    this.loot.add(loot);
+  }
+
+  private handlePlayerPickupLoot(
+    _playerObj:
+      | Phaser.Types.Physics.Arcade.GameObjectWithBody
+      | Phaser.Tilemaps.Tile,
+    lootObj:
+      | Phaser.Types.Physics.Arcade.GameObjectWithBody
+      | Phaser.Tilemaps.Tile
+  ) {
+    const loot = lootObj as LootPickup;
+
+    switch (loot.lootType) {
+      case "heal":
+        this.player.applyHeal(1);
+        this.updateHealthText();
+        break;
+      case "speed":
+        this.player.applySpeedBoost(1.5, 4000);
+        break;
+      case "armor":
+        this.player.applyArmor(4000);
+        break;
+    }
+
+    loot.destroy();
   }
 
   private handleGameOver() {
