@@ -41,6 +41,9 @@ export class GameScene extends Phaser.Scene {
 
   private gameOver = false;
   private gameOverText?: Phaser.GameObjects.Text;
+  private isStarted = false;
+  private startText?: Phaser.GameObjects.Text;
+  private startOverlay?: Phaser.GameObjects.Rectangle;
 
   private baseSpawnDelay = 1000;
   private currentSpawnDelay = 1000;
@@ -73,6 +76,7 @@ export class GameScene extends Phaser.Scene {
     // Резюмим физику и сбрасываем флаг gameOver при каждом старте/рестарте сцены
     this.physics.resume();
     this.gameOver = false;
+    this.isStarted = false;
 
     // Сбрасываем параметры сложности / стрельбы
     this.fireRate = 150;
@@ -169,8 +173,31 @@ export class GameScene extends Phaser.Scene {
     });
     this.updateXPText();
 
-    // Таймер спавна врагов
-    this.updateSpawnTimer();
+    // Стартовый экран: оверлей + текст
+    this.startOverlay = this.add.rectangle(
+      width / 2,
+      height / 2,
+      width,
+      height,
+      0x000000,
+      0.85
+    );
+    this.startOverlay.setOrigin(0.5, 0.5);
+    this.startOverlay.setScrollFactor(0);
+    this.startOverlay.setDepth(100);
+    this.startOverlay.setInteractive();
+
+    this.startText = this.add.text(width / 2, height / 2, "Click to start", {
+      fontSize: "32px",
+      color: "#ffffff",
+      align: "center",
+    });
+    this.startText.setOrigin(0.5, 0.5);
+    this.startText.setDepth(101);
+
+    this.startOverlay.once("pointerdown", () => {
+      this.startGame();
+    });
   }
 
   update(time: number) {
@@ -178,6 +205,10 @@ export class GameScene extends Phaser.Scene {
       if (Phaser.Input.Keyboard.JustDown(this.restartKey)) {
         this.scene.restart();
       }
+      return;
+    }
+
+    if (!this.isStarted) {
       return;
     }
 
@@ -395,8 +426,20 @@ export class GameScene extends Phaser.Scene {
       lootType = "armor";
     }
 
+    if (this.hasLootOfType(lootType)) {
+      return;
+    }
+
     const loot = new LootPickup(this, x, y, lootType);
     this.loot.add(loot);
+  }
+
+  private hasLootOfType(type: LootType): boolean {
+    const children = this.loot?.getChildren?.() ?? [];
+    return children.some((obj) => {
+      const loot = obj as LootPickup;
+      return loot.lootType === type;
+    });
   }
 
   private handlePlayerPickupLoot(
@@ -451,5 +494,43 @@ export class GameScene extends Phaser.Scene {
       }
     );
     this.gameOverText.setOrigin(0.5, 0.5);
+  }
+
+  private startGame() {
+    if (this.isStarted || this.gameOver) {
+      return;
+    }
+
+    this.isStarted = true;
+
+    this.updateSpawnTimer();
+
+    const targets: Phaser.GameObjects.GameObject[] = [];
+
+    if (this.startOverlay) {
+      targets.push(this.startOverlay);
+    }
+    if (this.startText) {
+      targets.push(this.startText);
+    }
+
+    if (targets.length > 0) {
+      this.tweens.add({
+        targets,
+        alpha: 0,
+        duration: 400,
+        ease: "Sine.easeInOut",
+        onComplete: () => {
+          if (this.startOverlay) {
+            this.startOverlay.destroy();
+            this.startOverlay = undefined;
+          }
+          if (this.startText) {
+            this.startText.destroy();
+            this.startText = undefined;
+          }
+        },
+      });
+    }
   }
 }
