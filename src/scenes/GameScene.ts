@@ -59,17 +59,11 @@ export class GameScene extends Phaser.Scene {
   }
 
   preload() {
-    this.load.svg("player", playerSvg, { width: 32, height: 32 });
-    this.load.svg("enemy", enemySvg, { width: 28, height: 28 });
-    this.load.svg("bullet", bulletSvg, { width: 8, height: 8 });
-    this.load.svg("loot-heal", healSvg, {
-      width: 32,
-      height: 32,
-    });
-    this.load.svg("loot-speed", speedSvg, {
-      width: 32,
-      height: 32,
-    });
+    this.load.image("player", playerSvg);
+    this.load.image("enemy", enemySvg);
+    this.load.image("bullet", bulletSvg);
+    this.load.image("loot-heal", healSvg);
+    this.load.image("loot-speed", speedSvg);
   }
 
   create() {
