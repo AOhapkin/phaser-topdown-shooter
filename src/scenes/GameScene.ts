@@ -9,6 +9,8 @@ import { BasicGun } from "../weapons/BasicGun";
 import playerSvg from "../assets/player.svg?url";
 import enemySvg from "../assets/enemy.svg?url";
 import bulletSvg from "../assets/bullet.svg?url";
+import healSvg from "../assets/heal.svg?url";
+import speedSvg from "../assets/speed.svg?url";
 
 type EnemyConfig = {
   type: EnemyType;
@@ -60,11 +62,11 @@ export class GameScene extends Phaser.Scene {
     this.load.svg("player", playerSvg, { width: 32, height: 32 });
     this.load.svg("enemy", enemySvg, { width: 28, height: 28 });
     this.load.svg("bullet", bulletSvg, { width: 8, height: 8 });
-    this.load.svg("loot-heal", "src/assets/heal.svg", {
+    this.load.svg("loot-heal", healSvg, {
       width: 32,
       height: 32,
     });
-    this.load.svg("loot-speed", "src/assets/speed.svg", {
+    this.load.svg("loot-speed", speedSvg, {
       width: 32,
       height: 32,
     });
