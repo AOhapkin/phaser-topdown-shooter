@@ -108,20 +108,23 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
   onLevelUp(level: number): void {
     let changed = false;
 
+    this.maxHealth += 1;
+    this.health = this.maxHealth;
+    changed = true;
+
     if (level % 2 === 0) {
-      this.maxHealth += 1;
-      this.health = this.maxHealth;
+      this.baseSpeed = Math.round(this.baseSpeed * 1.05);
       changed = true;
     }
 
-    if (level % 3 === 0) {
+    if (level % 4 === 0) {
       this.damage += 1;
       changed = true;
     }
 
     if (changed) {
       // Можно добавить визуальный эффект или лог
-      // console.log(`Player leveled up to ${level}: hp=${this.maxHealth}, dmg=${this.damage}`);
+      // console.log(`Level up ${level}: hp=${this.maxHealth}, speed=${this.baseSpeed}, dmg=${this.damage}`);
     }
   }
 

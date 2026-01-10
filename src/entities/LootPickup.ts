@@ -1,17 +1,13 @@
 import Phaser from "phaser";
 
-export type LootType = "heal" | "speed" | "armor";
+export type LootType = "heal" | "speed";
 
 export class LootPickup extends Phaser.Physics.Arcade.Sprite {
   public lootType: LootType;
 
   constructor(scene: Phaser.Scene, x: number, y: number, lootType: LootType) {
     const textureKey =
-      lootType === "heal"
-        ? "loot-heal"
-        : lootType === "speed"
-        ? "loot-speed"
-        : "bullet";
+      lootType === "heal" ? "loot-heal" : "loot-speed";
 
     super(scene, x, y, textureKey);
 

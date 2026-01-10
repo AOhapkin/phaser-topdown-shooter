@@ -28,9 +28,6 @@ export class GameScene extends Phaser.Scene {
   private bullets!: Phaser.Physics.Arcade.Group;
   private enemies!: Phaser.Physics.Arcade.Group;
 
-  private fireRate = 150; // мс между выстрелами
-  private bulletCount = 1;
-  private bulletSpread = 0.15;
 
   private score = 0;
   private scoreText!: Phaser.GameObjects.Text;
@@ -74,10 +71,7 @@ export class GameScene extends Phaser.Scene {
     this.gameOver = false;
     this.isStarted = false;
 
-    // Сбрасываем параметры сложности / стрельбы
-    this.fireRate = 150;
-    this.bulletCount = 1;
-    this.bulletSpread = 0.15;
+    // Сбрасываем параметры сложности
     this.baseSpawnDelay = 1000;
     this.currentSpawnDelay = this.baseSpawnDelay;
 
@@ -98,12 +92,8 @@ export class GameScene extends Phaser.Scene {
       runChildUpdate: false,
     });
 
-    // Оружие
-    this.weapon = new BasicGun({
-      fireRate: this.fireRate,
-      bulletCount: this.bulletCount,
-      bulletSpread: this.bulletSpread,
-    });
+    // Оружие: стартовый пистолет
+    this.weapon = new BasicGun({});
 
     // Группа врагов
     this.enemies = this.physics.add.group({
@@ -217,7 +207,7 @@ export class GameScene extends Phaser.Scene {
 
   // ЛКМ → выстрел в сторону курсора
   private handleShooting(time: number) {
-    if (this.gameOver || !this.player.isAlive()) {
+    if (this.gameOver || !this.player.isAlive() || !this.isStarted) {
       return;
     }
 
@@ -358,27 +348,12 @@ export class GameScene extends Phaser.Scene {
   }
 
   private onLevelUp() {
-    this.fireRate = Math.max(60, this.fireRate - 10);
-
-    this.currentSpawnDelay = Math.max(300, this.currentSpawnDelay - 100);
+    // Усложняем игру: немного уменьшаем задержку спавна врагов
+    // но не опускаемся ниже 400 мс
+    this.currentSpawnDelay = Math.max(400, this.currentSpawnDelay - 50);
     this.updateSpawnTimer();
 
-    if (this.level >= 6) {
-      this.bulletCount = 3;
-      this.bulletSpread = 0.3;
-    } else if (this.level >= 3) {
-      this.bulletCount = 2;
-      this.bulletSpread = 0.2;
-    } else {
-      this.bulletCount = 1;
-      this.bulletSpread = 0.15;
-    }
-
-    if (this.weapon instanceof BasicGun) {
-      this.weapon.setFireRate(this.fireRate);
-      this.weapon.setPattern(this.bulletCount, this.bulletSpread);
-    }
-
+    // Прокачка характеристик игрока
     this.player.onLevelUp(this.level);
   }
 
@@ -412,16 +387,16 @@ export class GameScene extends Phaser.Scene {
     }
 
     const roll = Math.random();
-    let lootType: LootType = "heal";
+    let lootType: LootType;
 
-    if (roll < 0.5) {
+    // heal 60%, speed 40%
+    if (roll < 0.6) {
       lootType = "heal";
-    } else if (roll < 0.8) {
-      lootType = "speed";
     } else {
-      lootType = "armor";
+      lootType = "speed";
     }
 
+    // Проверка: такого типа уже нет на поле
     if (this.hasLootOfType(lootType)) {
       return;
     }
@@ -454,10 +429,7 @@ export class GameScene extends Phaser.Scene {
         this.updateHealthText();
         break;
       case "speed":
-        this.player.applySpeedBoost(1.5, 4000);
-        break;
-      case "armor":
-        this.player.applyArmor(4000);
+        this.player.applySpeedBoost(1.5, 4000); // x1.5 на 4 секунды
         break;
     }
 
