@@ -5,6 +5,7 @@ import { Enemy, EnemyType } from "../entities/Enemy";
 import { LootPickup, LootType } from "../entities/LootPickup";
 import { Weapon } from "../weapons/Weapon";
 import { BasicGun } from "../weapons/BasicGun";
+import { LevelUpOverlay, LevelUpOption } from "../ui/LevelUpOverlay";
 
 import playerSvg from "../assets/player.svg?url";
 import enemySvg from "../assets/enemy.svg?url";
@@ -21,6 +22,8 @@ type EnemyConfig = {
 const ENEMY_CONFIGS: EnemyConfig[] = [
   { type: "runner", minLevel: 1, weight: 70 },
   { type: "tank", minLevel: 3, weight: 30 },
+  { type: "fast", minLevel: 5, weight: 25 },
+  { type: "heavy", minLevel: 7, weight: 20 },
 ];
 
 export class GameScene extends Phaser.Scene {
@@ -38,11 +41,20 @@ export class GameScene extends Phaser.Scene {
   private xpToNextLevel = 5;
   private xpText!: Phaser.GameObjects.Text;
 
+  private ammoText!: Phaser.GameObjects.Text;
+  private reloadProgressBarBg!: Phaser.GameObjects.Rectangle;
+  private reloadProgressBar!: Phaser.GameObjects.Rectangle;
+
   private gameOver = false;
   private gameOverText?: Phaser.GameObjects.Text;
   private isStarted = false;
-  private startText?: Phaser.GameObjects.Text;
   private startOverlay?: Phaser.GameObjects.Rectangle;
+  private startTitleText?: Phaser.GameObjects.Text;
+  private startHintText?: Phaser.GameObjects.Text;
+  private startHintTween?: Phaser.Tweens.Tween;
+  private suppressShootingUntil = 0; // timestamp in ms (scene.time.now)
+  private isLevelUpOpen = false;
+  private debugEnabled = false;
 
   private baseSpawnDelay = 1000;
   private currentSpawnDelay = 1000;
@@ -79,6 +91,20 @@ export class GameScene extends Phaser.Scene {
     this.restartKey = this.input.keyboard!.addKey(
       Phaser.Input.Keyboard.KeyCodes.R
     );
+
+    // Переключатель debug (F1)
+    const debugKey = this.input.keyboard?.addKey(
+      Phaser.Input.Keyboard.KeyCodes.F1
+    );
+    debugKey?.on("down", () => {
+      this.debugEnabled = !this.debugEnabled;
+      // Переключаем debug режим Arcade Physics
+      const arcadeWorld = this.physics.world as Phaser.Physics.Arcade.World;
+      if (arcadeWorld) {
+        arcadeWorld.drawDebug = this.debugEnabled;
+        arcadeWorld.debugGraphic?.clear();
+      }
+    });
 
     // Игрок
     this.player = new Player(this, width / 2, height / 2);
@@ -159,31 +185,93 @@ export class GameScene extends Phaser.Scene {
     });
     this.updateXPText();
 
-    // Стартовый экран: оверлей + текст
-    this.startOverlay = this.add.rectangle(
-      width / 2,
-      height / 2,
-      width,
-      height,
-      0x000000,
-      0.85
-    );
-    this.startOverlay.setOrigin(0.5, 0.5);
-    this.startOverlay.setScrollFactor(0);
-    this.startOverlay.setDepth(100);
-    this.startOverlay.setInteractive();
-
-    this.startText = this.add.text(width / 2, height / 2, "Click to start", {
-      fontSize: "32px",
+    // UI: патроны и прогресс-бар перезарядки (слева внизу)
+    const ammoY = height - 60;
+    this.ammoText = this.add.text(16, ammoY, "Ammo: 6/6", {
+      fontSize: "18px",
       color: "#ffffff",
-      align: "center",
     });
-    this.startText.setOrigin(0.5, 0.5);
-    this.startText.setDepth(101);
+    this.ammoText.setScrollFactor(0);
 
-    this.startOverlay.once("pointerdown", () => {
-      this.startGame();
+    // Фон прогресс-бара
+    this.reloadProgressBarBg = this.add.rectangle(
+      16,
+      ammoY + 25,
+      200,
+      8,
+      0x333333,
+      0.8
+    );
+    this.reloadProgressBarBg.setOrigin(0, 0);
+    this.reloadProgressBarBg.setScrollFactor(0);
+    this.reloadProgressBarBg.setVisible(false);
+
+    // Сам прогресс-бар
+    this.reloadProgressBar = this.add.rectangle(
+      16,
+      ammoY + 25,
+      0,
+      8,
+      0xff6b6b
+    );
+    this.reloadProgressBar.setOrigin(0, 0);
+    this.reloadProgressBar.setScrollFactor(0);
+    this.reloadProgressBar.setVisible(false);
+
+    // Стартовый экран: оверлей + title + мерцающий hint
+    this.isStarted = false;
+
+    this.startOverlay = this.add
+      .rectangle(width / 2, height / 2, width, height, 0x000000, 0.94)
+      .setOrigin(0.5, 0.5)
+      .setScrollFactor(0)
+      .setDepth(10000)
+      .setInteractive({ useHandCursor: true });
+
+    this.startTitleText = this.add
+      .text(width / 2, height / 2 - 40, "SWARM RUN", {
+        fontSize: "64px",
+        color: "#ffffff",
+        fontStyle: "bold",
+      })
+      .setOrigin(0.5, 0.5)
+      .setScrollFactor(0)
+      .setDepth(10001);
+
+    this.startHintText = this.add
+      .text(width / 2, height / 2 + 40, "Click to start", {
+        fontSize: "28px",
+        color: "#ffffff",
+      })
+      .setOrigin(0.5, 0.5)
+      .setScrollFactor(0)
+      .setDepth(10001);
+
+    // Мерцание hint
+    this.startHintTween = this.tweens.add({
+      targets: this.startHintText,
+      alpha: 0.35,
+      duration: 700,
+      yoyo: true,
+      repeat: -1,
+      ease: "Sine.easeInOut",
     });
+
+    // Обработчик клика с stopPropagation
+    this.startOverlay.on(
+      "pointerdown",
+      (
+        _p: Phaser.Input.Pointer,
+        _lx: number,
+        _ly: number,
+        event: any
+      ) => {
+        if (event?.stopPropagation) {
+          event.stopPropagation();
+        }
+        this.startGameFromOverlay();
+      }
+    );
   }
 
   update(time: number) {
@@ -198,16 +286,31 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
+    if (this.isLevelUpOpen) {
+      return;
+    }
+
     if (this.player) {
       this.player.update();
     }
 
     this.handleShooting(time);
+    this.updateAmmoUI(time);
   }
 
   // ЛКМ → выстрел в сторону курсора
   private handleShooting(time: number) {
-    if (this.gameOver || !this.player.isAlive() || !this.isStarted) {
+    if (
+      this.gameOver ||
+      !this.player.isAlive() ||
+      !this.isStarted ||
+      this.isLevelUpOpen
+    ) {
+      return;
+    }
+
+    // Блокируем стрельбу на короткое время после старта
+    if (this.time.now < this.suppressShootingUntil) {
       return;
     }
 
@@ -260,14 +363,40 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    const totalWeight = availableConfigs.reduce(
+    // Динамические веса: runner реже на высоких уровнях, tank/heavy чаще
+    const configsWithWeights = availableConfigs.map((cfg) => {
+      let weight = cfg.weight;
+
+      // Runner становится реже на высоких уровнях
+      if (cfg.type === "runner") {
+        weight = Math.max(20, 70 - (this.level - 1) * 3);
+      }
+
+      // Tank становится чаще
+      if (cfg.type === "tank") {
+        weight = Math.min(50, 30 + (this.level - 3) * 3);
+      }
+
+      // Heavy становится чаще на высоких уровнях
+      if (cfg.type === "heavy") {
+        weight = Math.min(40, 20 + (this.level - 7) * 2);
+      }
+
+      return { ...cfg, weight };
+    });
+
+    const totalWeight = configsWithWeights.reduce(
       (sum, cfg) => sum + cfg.weight,
       0
     );
-    let roll = Phaser.Math.Between(1, totalWeight);
-    let chosen = availableConfigs[0];
+    if (totalWeight <= 0) {
+      return;
+    }
 
-    for (const cfg of availableConfigs) {
+    let roll = Phaser.Math.Between(1, totalWeight);
+    let chosen = configsWithWeights[0];
+
+    for (const cfg of configsWithWeights) {
       if (roll <= cfg.weight) {
         chosen = cfg;
         break;
@@ -275,7 +404,15 @@ export class GameScene extends Phaser.Scene {
       roll -= cfg.weight;
     }
 
-    const enemy = new Enemy(this, x, y, this.player, chosen.type);
+    const enemy = new Enemy(
+      this,
+      x,
+      y,
+      this.player,
+      chosen.type,
+      this.level,
+      this.enemies
+    );
     this.enemies.add(enemy);
   }
 
@@ -291,9 +428,16 @@ export class GameScene extends Phaser.Scene {
     const bullet = bulletObj as Bullet;
     const enemy = enemyObj as Enemy;
 
-    bullet.destroy();
+    // Визуальный фидбек до уничтожения пули
+    enemy.applyHitFeedback(bullet.x, bullet.y, this.time.now);
 
-    const killed = enemy.takeDamage(this.player.getDamage());
+    // Наносим урон
+    const gun = this.weapon as BasicGun;
+    const totalDamage = this.player.getDamage() + gun.getDamageBonus();
+    const killed = enemy.takeDamage(totalDamage);
+
+    // Пуля всегда исчезает при попадании
+    bullet.destroy();
 
     if (killed) {
       this.score += 1;
@@ -306,20 +450,39 @@ export class GameScene extends Phaser.Scene {
 
   // Враг коснулся игрока
   private handleEnemyHitPlayer(
-    _playerObj:
+    playerObj:
       | Phaser.Types.Physics.Arcade.GameObjectWithBody
       | Phaser.Tilemaps.Tile,
     enemyObj:
       | Phaser.Types.Physics.Arcade.GameObjectWithBody
       | Phaser.Tilemaps.Tile
   ) {
+    const player = playerObj as Player;
     const enemy = enemyObj as Enemy;
-    enemy.destroy();
 
-    this.player.takeDamage(1);
+    if (!player.isAlive()) {
+      return;
+    }
+
+    // Если игрок неуязвим — просто игнорируем контакт
+    if (player.isInvulnerable()) {
+      return;
+    }
+
+    // 1) Наносим урон
+    player.takeDamage(1);
     this.updateHealthText();
 
-    if (!this.player.isAlive()) {
+    // 2) Запускаем i-frames
+    player.startInvulnerability(800); // 800ms — хороший старт
+
+    // 3) Отбрасываем игрока
+    const strength = enemy.getType() === "tank" ? 320 : 260; // Чуть сильнее от танка
+    player.applyKnockback(enemy.x, enemy.y, strength, 140); // 140ms knockback
+
+    // Врага НЕ уничтожаем!
+
+    if (!player.isAlive()) {
       this.handleGameOver();
     }
   }
@@ -344,6 +507,7 @@ export class GameScene extends Phaser.Scene {
       this.xpToNextLevel = Math.floor(this.xpToNextLevel * 1.5);
 
       this.onLevelUp();
+      this.showLevelUpOverlay();
     }
   }
 
@@ -357,10 +521,118 @@ export class GameScene extends Phaser.Scene {
     this.player.onLevelUp(this.level);
   }
 
+  private showLevelUpOverlay() {
+    if (this.isLevelUpOpen) {
+      return;
+    }
+
+    this.isLevelUpOpen = true;
+
+    // Пауза игры
+    this.physics.pause();
+    this.time.timeScale = 0;
+
+    const options: LevelUpOption[] = this.getAvailableLevelUpOptions();
+
+    new LevelUpOverlay(this, options, () => {
+      // Закрыли overlay — продолжаем игру
+      this.isLevelUpOpen = false;
+      this.time.timeScale = 1;
+      this.physics.resume();
+
+      // ВАЖНО: сбросить состояние кнопки мыши,
+      // чтобы удержание/клик не превратился в автоматический выстрел сразу после закрытия
+      this.input.activePointer.isDown = false;
+    });
+  }
+
+  private getAvailableLevelUpOptions(): LevelUpOption[] {
+    const gun = this.weapon as BasicGun;
+    const all: LevelUpOption[] = [];
+
+    if (gun.canIncreaseDamage()) {
+      all.push({
+        title: "DAMAGE +1",
+        description: "",
+        apply: () => {
+          gun.increaseDamage();
+        },
+      });
+    }
+
+    if (gun.canDecreaseFireRate(40)) {
+      all.push({
+        title: "FIRE RATE -40ms",
+        description: "",
+        apply: () => {
+          gun.decreaseFireRate(40);
+        },
+      });
+    }
+
+    if (gun.canDecreaseReloadTime(150)) {
+      all.push({
+        title: "RELOAD -150ms",
+        description: "",
+        apply: () => {
+          gun.decreaseReloadTime(150);
+        },
+      });
+    }
+
+    if (gun.canIncreaseMagazine(1)) {
+      all.push({
+        title: "MAGAZINE +1",
+        description: "",
+        apply: () => {
+          gun.increaseMagazine(1);
+        },
+      });
+    }
+
+    // Если доступных улучшений меньше 3, возвращаем все доступные
+    if (all.length === 0) {
+      return [];
+    }
+
+    // Перемешиваем и берем 3 случайных
+    Phaser.Utils.Array.Shuffle(all);
+    return all.slice(0, 3);
+  }
+
+
   private updateXPText() {
     this.xpText.setText(
       `LVL: ${this.level}  XP: ${this.xp}/${this.xpToNextLevel}`
     );
+  }
+
+  private updateAmmoUI(time: number) {
+    if (!this.weapon || !(this.weapon instanceof BasicGun)) {
+      return;
+    }
+
+    const gun = this.weapon as BasicGun;
+    const ammo = gun.getAmmo();
+    const magazineSize = gun.getMagazineSize();
+    const isReloading = gun.getIsReloading();
+    const reloadProgress = gun.getReloadProgress(time);
+
+    // Обновляем текст патронов
+    this.ammoText.setText(`Ammo: ${ammo}/${magazineSize}`);
+
+    // Показываем/скрываем прогресс-бар перезарядки
+    if (isReloading) {
+      this.reloadProgressBarBg.setVisible(true);
+      this.reloadProgressBar.setVisible(true);
+
+      // Обновляем ширину прогресс-бара (0-200px)
+      const barWidth = 200 * reloadProgress;
+      this.reloadProgressBar.setSize(barWidth, 8);
+    } else {
+      this.reloadProgressBarBg.setVisible(false);
+      this.reloadProgressBar.setVisible(false);
+    }
   }
 
   private updateSpawnTimer() {
@@ -464,41 +736,59 @@ export class GameScene extends Phaser.Scene {
     this.gameOverText.setOrigin(0.5, 0.5);
   }
 
-  private startGame() {
+  private startGameFromOverlay() {
     if (this.isStarted || this.gameOver) {
       return;
     }
 
+    // Важно: "съесть" клик, чтобы не было выстрела
+    this.input.activePointer.isDown = false;
+
+    // Блокируем стрельбу на короткое время после старта
+    this.suppressShootingUntil = this.time.now + 200;
+
     this.isStarted = true;
 
+    // Стартуем спавн и прочее
     this.updateSpawnTimer();
 
-    const targets: Phaser.GameObjects.GameObject[] = [];
+    // Выключаем мерцание
+    if (this.startHintTween) {
+      this.startHintTween.stop();
+      this.startHintTween = undefined;
+    }
 
+    // Плавно скрываем overlay + тексты
+    const targets: Phaser.GameObjects.GameObject[] = [];
     if (this.startOverlay) {
       targets.push(this.startOverlay);
     }
-    if (this.startText) {
-      targets.push(this.startText);
+    if (this.startTitleText) {
+      targets.push(this.startTitleText);
+    }
+    if (this.startHintText) {
+      targets.push(this.startHintText);
     }
 
-    if (targets.length > 0) {
-      this.tweens.add({
-        targets,
-        alpha: 0,
-        duration: 400,
-        ease: "Sine.easeInOut",
-        onComplete: () => {
-          if (this.startOverlay) {
-            this.startOverlay.destroy();
-            this.startOverlay = undefined;
-          }
-          if (this.startText) {
-            this.startText.destroy();
-            this.startText = undefined;
-          }
-        },
-      });
-    }
+    this.tweens.add({
+      targets,
+      alpha: 0,
+      duration: 220,
+      ease: "Sine.easeInOut",
+      onComplete: () => {
+        if (this.startOverlay) {
+          this.startOverlay.destroy();
+          this.startOverlay = undefined;
+        }
+        if (this.startTitleText) {
+          this.startTitleText.destroy();
+          this.startTitleText = undefined;
+        }
+        if (this.startHintText) {
+          this.startHintText.destroy();
+          this.startHintText = undefined;
+        }
+      },
+    });
   }
 }

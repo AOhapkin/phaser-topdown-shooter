@@ -13,6 +13,8 @@ export class BasicGun implements Weapon {
   private isReloading = false;
   private reloadEndTime = 0;
 
+  private damageBonus = 0;
+
   constructor(options?: {
     fireRate?: number;
     magazineSize?: number;
@@ -31,6 +33,88 @@ export class BasicGun implements Weapon {
 
   setFireRate(value: number) {
     this.fireRate = value;
+  }
+
+  getAmmo(): number {
+    return this.ammo;
+  }
+
+  getMagazineSize(): number {
+    return this.magazineSize;
+  }
+
+  getIsReloading(): boolean {
+    return this.isReloading;
+  }
+
+  getReloadProgress(time: number): number {
+    if (!this.isReloading) {
+      return 0;
+    }
+
+    const elapsed = time - (this.reloadEndTime - this.reloadTime);
+    const progress = Math.min(1, Math.max(0, elapsed / this.reloadTime));
+    return progress;
+  }
+
+  getDamageBonus(): number {
+    return this.damageBonus;
+  }
+
+  // Методы для улучшений с проверкой капов
+  increaseDamage(): boolean {
+    if (this.damageBonus >= 2) {
+      return false;
+    }
+    this.damageBonus += 1;
+    return true;
+  }
+
+  canIncreaseDamage(): boolean {
+    return this.damageBonus < 2;
+  }
+
+  decreaseFireRate(amount: number): boolean {
+    const newRate = this.fireRate - amount;
+    if (newRate < 420) {
+      return false;
+    }
+    this.fireRate = newRate;
+    return true;
+  }
+
+  canDecreaseFireRate(amount: number): boolean {
+    return this.fireRate - amount >= 420;
+  }
+
+  decreaseReloadTime(amount: number): boolean {
+    const newTime = this.reloadTime - amount;
+    if (newTime < 900) {
+      return false;
+    }
+    this.reloadTime = newTime;
+    return true;
+  }
+
+  canDecreaseReloadTime(amount: number): boolean {
+    return this.reloadTime - amount >= 900;
+  }
+
+  increaseMagazine(amount: number): boolean {
+    const newSize = this.magazineSize + amount;
+    if (newSize > 10) {
+      return false;
+    }
+    this.magazineSize = newSize;
+    // Если перезарядка не идет, обновляем текущий магазин
+    if (!this.isReloading) {
+      this.ammo = Math.min(this.ammo + amount, this.magazineSize);
+    }
+    return true;
+  }
+
+  canIncreaseMagazine(amount: number): boolean {
+    return this.magazineSize + amount <= 10;
   }
 
   private startReload(time: number) {

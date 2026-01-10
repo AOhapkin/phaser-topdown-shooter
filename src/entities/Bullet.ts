@@ -14,6 +14,9 @@ export class Bullet extends Phaser.Physics.Arcade.Image {
     const body = this.body as Phaser.Physics.Arcade.Body;
     body.setAllowGravity(false);
 
+    // Маленький круглый hitbox для точного попадания
+    this.setCircle(4);
+
     // Пуля живёт ограниченное время, чтобы не тащить хвост из объектов
     scene.time.delayedCall(1200, () => {
       if (!this.active) return;

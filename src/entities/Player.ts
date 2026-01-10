@@ -25,6 +25,13 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
   private speedBoostEndTime = 0;
   private armorEndTime = 0;
 
+  // I-frames и knockback
+  private invulnerableUntil = 0; // timestamp scene.time.now
+  private knockbackUntil = 0;
+  private knockbackVx = 0;
+  private knockbackVy = 0;
+  private invulnTween?: Phaser.Tweens.Tween;
+
   constructor(scene: Phaser.Scene, x: number, y: number) {
     super(scene, x, y, "player");
 
@@ -62,8 +69,57 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
     return this.damage;
   }
 
+  public isInvulnerable(): boolean {
+    return this.scene.time.now < this.invulnerableUntil;
+  }
+
+  public applyKnockback(
+    fromX: number,
+    fromY: number,
+    strength: number,
+    durationMs: number
+  ): void {
+    const dx = this.x - fromX;
+    const dy = this.y - fromY;
+    const dist = Math.max(0.0001, Math.hypot(dx, dy));
+    const nx = dx / dist;
+    const ny = dy / dist;
+
+    this.knockbackVx = nx * strength;
+    this.knockbackVy = ny * strength;
+    this.knockbackUntil = this.scene.time.now + durationMs;
+  }
+
+  public startInvulnerability(durationMs: number): void {
+    this.invulnerableUntil = this.scene.time.now + durationMs;
+
+    // визуальный фидбек: мерцание
+    this.invulnTween?.stop();
+    this.setAlpha(1);
+
+    this.invulnTween = this.scene.tweens.add({
+      targets: this,
+      alpha: 0.4,
+      duration: 80,
+      yoyo: true,
+      repeat: Math.floor(durationMs / 160),
+    });
+
+    // по окончании обязательно вернуть alpha
+    this.scene.time.delayedCall(durationMs, () => {
+      this.invulnTween?.stop();
+      this.invulnTween = undefined;
+      this.setAlpha(1);
+    });
+  }
+
   takeDamage(amount: number): void {
     if (!this.alive) {
+      return;
+    }
+
+    // Если уже неуязвим - игнорируем урон
+    if (this.isInvulnerable()) {
       return;
     }
 
@@ -77,6 +133,9 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
       this.alive = false;
       const body = this.body as Phaser.Physics.Arcade.Body;
       body.setVelocity(0, 0);
+      // Останавливаем твины и возвращаем alpha при смерти
+      this.invulnTween?.stop();
+      this.setAlpha(1);
     }
   }
 
@@ -140,6 +199,21 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
     }
 
     this.updateBuffs();
+
+    // Если активен knockback - применяем его и не даём управлять
+    if (this.knockbackUntil > this.scene.time.now) {
+      body.setVelocity(this.knockbackVx, this.knockbackVy);
+      // Обновляем rotation к курсору
+      const pointer = this.scene.input.activePointer;
+      const angle = Phaser.Math.Angle.Between(
+        this.x,
+        this.y,
+        pointer.worldX,
+        pointer.worldY
+      );
+      this.setRotation(angle);
+      return;
+    }
 
     let vx = 0;
     let vy = 0;

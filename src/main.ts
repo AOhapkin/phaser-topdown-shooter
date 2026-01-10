@@ -9,7 +9,7 @@ const config: Phaser.Types.Core.GameConfig = {
   physics: {
     default: 'arcade',
     arcade: {
-      debug: true,
+      debug: false, // По умолчанию выключен, можно включить через F1 в игре
     },
   },
   scene: [GameScene],
