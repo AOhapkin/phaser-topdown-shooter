@@ -2,6 +2,8 @@ import Phaser from 'phaser';
 
 export class Bullet extends Phaser.Physics.Arcade.Image {
   public speed = 500;
+  public pierceLeft = 0; // Сколько врагов может пробить
+  private hitEnemies = new Set<Phaser.GameObjects.GameObject>(); // Враги, в которых уже попали
 
   constructor(scene: Phaser.Scene, x: number, y: number) {
     super(scene, x, y, 'bullet');
@@ -22,6 +24,14 @@ export class Bullet extends Phaser.Physics.Arcade.Image {
       if (!this.active) return;
       this.destroy();
     });
+  }
+
+  public hasHitEnemy(enemy: Phaser.GameObjects.GameObject): boolean {
+    return this.hitEnemies.has(enemy);
+  }
+
+  public markEnemyHit(enemy: Phaser.GameObjects.GameObject): void {
+    this.hitEnemies.add(enemy);
   }
 }
 

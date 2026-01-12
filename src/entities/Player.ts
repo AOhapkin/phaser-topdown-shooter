@@ -18,7 +18,7 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
   private baseMaxHealth = 3;
   private maxHealth = this.baseMaxHealth;
   private health = this.maxHealth;
-  private maxHpUpgrades = 0; // 0..5
+  private maxHpUpgrades = 0; // 0..7 (cap: maxHealth = 10)
 
   private damage = 1;
 
@@ -35,6 +35,10 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
   private invulnTween?: Phaser.Tweens.Tween;
   private baseIFramesMs = 800;
   private iFramesBonusLevel = 0; // 0..4
+
+  // Stage Clear perks
+  private knockbackMultiplier = 1.0; // Умножает силу knockback
+  private lootPickupRadiusMultiplier = 1.0; // Умножает радиус подбора лута
 
   constructor(scene: Phaser.Scene, x: number, y: number) {
     super(scene, x, y, "player");
@@ -89,9 +93,24 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
     const nx = dx / dist;
     const ny = dy / dist;
 
-    this.knockbackVx = nx * strength;
-    this.knockbackVy = ny * strength;
+    // Применяем множитель knockback из перков
+    const finalStrength = strength * this.knockbackMultiplier;
+
+    this.knockbackVx = nx * finalStrength;
+    this.knockbackVy = ny * finalStrength;
     this.knockbackUntil = this.scene.time.now + durationMs;
+  }
+
+  public increaseKnockbackMultiplier(amount: number): void {
+    this.knockbackMultiplier += amount;
+  }
+
+  public getLootPickupRadiusMultiplier(): number {
+    return this.lootPickupRadiusMultiplier;
+  }
+
+  public increaseLootPickupRadiusMultiplier(amount: number): void {
+    this.lootPickupRadiusMultiplier += amount;
   }
 
   public getIFramesMs(): number {
@@ -111,11 +130,13 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
   }
 
   public canIncreaseMoveSpeed(): boolean {
-    return this.moveSpeedLevel < 5;
+    // cap: moveSpeedLevel max = 16 (1 + 16*0.05 = 1.8 multiplier)
+    return this.moveSpeedLevel < 16;
   }
 
   public increaseMoveSpeed(): boolean {
-    if (this.moveSpeedLevel >= 5) {
+    // cap: moveSpeedLevel max = 16 (1 + 16*0.05 = 1.8 multiplier)
+    if (this.moveSpeedLevel >= 16) {
       return false;
     }
     this.moveSpeedLevel++;
@@ -123,12 +144,12 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
   }
 
   public canIncreaseMaxHp(): boolean {
-    return this.maxHpUpgrades < 5;
+    return this.maxHpUpgrades < 7; // cap: maxHealth = 10 (base 3 + 7 upgrades)
   }
 
   public increaseMaxHp(): boolean {
-    if (this.maxHpUpgrades >= 5) {
-      return false;
+    if (this.maxHpUpgrades >= 7) {
+      return false; // cap: maxHealth = 10 (base 3 + 7 upgrades)
     }
     this.maxHpUpgrades++;
     this.maxHealth++;

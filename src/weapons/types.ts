@@ -25,7 +25,7 @@ export interface Weapon {
     playerY: number;
     aimAngle: number;
     bullets: Phaser.Physics.Arcade.Group;
-    onBulletSpawned?: () => void;
+    onBulletSpawned?: (bullet: import("../entities/Bullet").Bullet) => void;
   }): void;
 
   refillAndReset(): void; // после смены оружия/рестарта

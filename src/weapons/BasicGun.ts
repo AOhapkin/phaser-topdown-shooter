@@ -71,28 +71,28 @@ export class BasicGun implements Weapon {
   // Методы для улучшений с проверкой капов
   decreaseFireRate(amount: number): boolean {
     const newRate = this.fireRate - amount;
-    if (newRate < 420) {
-      return false;
+    if (newRate < 140) {
+      return false; // Минимум 140ms
     }
     this.fireRate = newRate;
     return true;
   }
 
   canDecreaseFireRate(amount: number): boolean {
-    return this.fireRate - amount >= 420;
+    return this.fireRate - amount >= 140;
   }
 
   decreaseReloadTime(amount: number): boolean {
     const newTime = this.reloadTime - amount;
-    if (newTime < 900) {
-      return false;
+    if (newTime < 600) {
+      return false; // Минимум 600ms
     }
     this.reloadTime = newTime;
     return true;
   }
 
   canDecreaseReloadTime(amount: number): boolean {
-    return this.reloadTime - amount >= 900;
+    return this.reloadTime - amount >= 600;
   }
 
   increaseMagazine(amount: number): boolean {
@@ -140,7 +140,7 @@ export class BasicGun implements Weapon {
     playerY: number;
     aimAngle: number;
     bullets: Phaser.Physics.Arcade.Group;
-    onBulletSpawned?: () => void;
+    onBulletSpawned?: (bullet: import("../entities/Bullet").Bullet) => void;
   }): void {
     const { scene, time, playerX, playerY, aimAngle, bullets, onBulletSpawned } = args;
 
@@ -161,7 +161,7 @@ export class BasicGun implements Weapon {
 
     const bullet = new Bullet(scene, playerX, playerY);
     bullets.add(bullet);
-    onBulletSpawned?.();
+    onBulletSpawned?.(bullet);
 
     const speed = bullet.speed;
     const vx = Math.cos(aimAngle) * speed;

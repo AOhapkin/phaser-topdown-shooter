@@ -95,7 +95,7 @@ export class Shotgun implements Weapon {
     playerY: number;
     aimAngle: number;
     bullets: Phaser.Physics.Arcade.Group;
-    onBulletSpawned?: () => void;
+    onBulletSpawned?: (bullet: import("../entities/Bullet").Bullet) => void;
   }): void {
     const { scene, time, playerX, playerY, aimAngle, bullets, onBulletSpawned } = args;
 
@@ -119,7 +119,7 @@ export class Shotgun implements Weapon {
       const bulletAngle = aimAngle + spreadOffset;
       const bullet = new Bullet(scene, playerX, playerY);
       bullets.add(bullet);
-      onBulletSpawned?.();
+      onBulletSpawned?.(bullet);
 
       const speed = bullet.speed;
       const vx = Math.cos(bulletAngle) * speed;

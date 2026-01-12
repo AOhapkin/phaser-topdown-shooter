@@ -55,30 +55,37 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
   private target: Player;
   private speed!: number; // Инициализируется в конструкторе
   private baseSpeed = 80;
+  private speedMultiplier = 1.0; // Множитель скорости (для burst)
 
   public readonly type: EnemyType;
   private maxHealth!: number; // Инициализируется в конструкторе
   private health!: number; // Инициализируется в конструкторе
   private baseMaxHealth = 1;
-  private phase = 1;
+  private stage = 1; // Используется для HP scaling
 
   public getType(): EnemyType {
     return this.type;
   }
 
+  public setSpeedMultiplier(multiplier: number): void {
+    this.speedMultiplier = multiplier;
+  }
+
   private computeMaxHealth(): number {
+    // Используем stage для HP scaling (каждые 3 стадии)
     if (this.type === "runner") {
-      if (this.phase >= 5) return 2;
+      if (this.stage >= 7) return 3;
+      if (this.stage >= 4) return 2;
       return 1;
     }
 
     if (this.type === "tank") {
-      if (this.phase >= 7) return 5;
-      if (this.phase >= 4) return 4;
+      if (this.stage >= 7) return 5;
+      if (this.stage >= 4) return 4;
       return 3; // Минимум 3 HP для tank
     }
 
-    // fast и heavy пока не скейлятся по фазе
+    // fast и heavy пока не скейлятся
     if (this.type === "fast") {
       return 1;
     }
@@ -91,18 +98,14 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
   }
 
   private computeSpeed(): number {
-    if (this.type === "runner") {
-      if (this.phase >= 6) return Math.round(this.baseSpeed * 1.08);
-      return this.baseSpeed;
-    }
-
-    // tank — НЕ ускоряем
-    if (this.type === "tank") {
-      return this.baseSpeed;
-    }
-
-    // fast и heavy пока не скейлятся по фазе
+    // Базовая скорость по типу
     return this.baseSpeed;
+  }
+
+  public getStageSpeedMultiplier(): number {
+    // Возвращаем множитель скорости для стадии (будет применён в GameScene)
+    // Базовая скорость уже установлена, множитель применяется отдельно
+    return 1.0;
   }
 
   // Система движения
@@ -131,15 +134,16 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
     y: number,
     target: Player,
     type: EnemyType = "runner",
-    phase: number = 1,
-    enemiesGroup: Phaser.Physics.Arcade.Group
+    _phase: number = 1, // Оставлен для совместимости, но не используется
+    enemiesGroup: Phaser.Physics.Arcade.Group,
+    stage: number = 1
   ) {
     super(scene, x, y, "enemy");
 
     this.target = target;
     this.type = type;
     this.enemiesGroup = enemiesGroup;
-    this.phase = phase;
+    this.stage = stage;
 
     scene.add.existing(this);
     scene.physics.add.existing(this);
@@ -255,9 +259,10 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
     const dirX = dx / dist;
     const dirY = dy / dist;
 
-    // 3) Pursuit velocity
-    let desiredVelX = dirX * this.speed;
-    let desiredVelY = dirY * this.speed;
+    // 3) Pursuit velocity (с учётом speed multiplier для burst)
+    const effectiveSpeed = this.speed * this.speedMultiplier;
+    let desiredVelX = dirX * effectiveSpeed;
+    let desiredVelY = dirY * effectiveSpeed;
 
     // 4) Separation
     let pushX = 0;
@@ -317,9 +322,9 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
     this.desiredVx = Phaser.Math.Linear(this.desiredVx, desiredVelX, t);
     this.desiredVy = Phaser.Math.Linear(this.desiredVy, desiredVelY, t);
 
-    // Ограничиваем максимальную скорость
+    // Ограничиваем максимальную скорость (с учётом multiplier)
     const currentSpeed = Math.hypot(this.desiredVx, this.desiredVy);
-    const maxSpeed = this.speed * 1.35;
+    const maxSpeed = effectiveSpeed * 1.35;
     if (currentSpeed > maxSpeed) {
       const factor = maxSpeed / currentSpeed;
       this.desiredVx *= factor;

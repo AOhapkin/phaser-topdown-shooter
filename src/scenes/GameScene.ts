@@ -6,7 +6,7 @@ import { LootPickup, LootType } from "../entities/LootPickup";
 import { Weapon } from "../weapons/types";
 import { BasicGun } from "../weapons/BasicGun";
 import { Shotgun } from "../weapons/Shotgun";
-import { LevelUpOverlay, LevelUpOption } from "../ui/LevelUpOverlay";
+import { LevelUpOption } from "../ui/LevelUpOverlay";
 
 import playerSvg from "../assets/player.svg?url";
 import enemySvg from "../assets/enemy.svg?url";
@@ -39,6 +39,21 @@ type PhaseSettings = {
 
 const PHASE_DURATION_SEC = 45;
 const MIN_SPAWN_DELAY_MS = 560;
+
+// Stage system constants
+const STAGE_DURATION_SEC = 75;
+const BURST_INTERVAL_MIN_SEC = 12;
+const BURST_INTERVAL_MAX_SEC = 15;
+const BURST_DURATION_MIN_SEC = 4;
+const BURST_DURATION_MAX_SEC = 6;
+const RECOVERY_DURATION_MIN_SEC = 2;
+const RECOVERY_DURATION_MAX_SEC = 3;
+
+// Burst modifiers
+const BURST_SPAWN_REDUCTION = 0.45; // 45% reduction (spawn 55% faster)
+const BURST_RUNNER_WEIGHT_BOOST = 1.3; // 30% boost to runner weight
+const BURST_SPEED_BOOST = 1.12; // 12% speed increase
+const RECOVERY_SPAWN_MULTIPLIER = 1.2; // 20% slower spawn (multiply delay by 1.2)
 
 type MatchStats = {
   startedAtMs: number;
@@ -133,23 +148,47 @@ export class GameScene extends Phaser.Scene {
   private startHintTween?: Phaser.Tweens.Tween;
   private suppressShootingUntil = 0; // timestamp in ms (scene.time.now)
   private isLevelUpOpen = false;
+  private isStageClear = false;
   private debugEnabled = false;
 
-  private baseSpawnDelay = 1000;
-  private currentSpawnDelay = 1000;
-  private spawnEvent?: Phaser.Time.TimerEvent;
+  // Stable spawn scheduler
+  private spawnTickEvent?: Phaser.Time.TimerEvent;
+  private nextSpawnAtMs = 0;
+  private currentBaseSpawnDelayMs = 1000; // from phase settings
+  private spawnDelayMultiplier = 1.0; // burst/recovery modifier
+  private lastSpawnDebugLog = 0; // for temporary debug logging
   private restartKey!: Phaser.Input.Keyboard.Key;
+  private continueKey!: Phaser.Input.Keyboard.Key;
   private loot!: Phaser.Physics.Arcade.Group;
   private weapon!: Weapon;
+  private stageClearOverlay?: Phaser.GameObjects.Container;
 
   // Phase system
   private runStartTime = 0;
   private currentPhase = 1;
   private phaseText?: Phaser.GameObjects.Text;
 
+  // Stage system
+  private currentStage = 1;
+  private stageStartTime = 0; // Time when current stage started
+  private stageElapsedSec = 0;
+
+  // Burst cycle
+  private burstState: "idle" | "burst" | "recovery" = "idle";
+  private nextBurstTime = 0; // When next burst should start
+  private burstEndTime = 0; // When current burst ends
+  private recoveryEndTime = 0; // When recovery ends
+
   // Match stats
   private stats!: MatchStats;
   private debugLogs = false; // выключить шумные логи
+
+  // Stage Clear perks
+  private playerPierceLevel = 0; // Сколько врагов может пробить пуля
+
+  // Upgrade points system
+  private upgradePoints = 0; // Очки для прокачки между стадиями
+  private upgradePointsText?: Phaser.GameObjects.Text;
 
   constructor() {
     super("GameScene");
@@ -172,16 +211,36 @@ export class GameScene extends Phaser.Scene {
     this.isStarted = false;
 
     // Сбрасываем параметры сложности
-    this.baseSpawnDelay = 1000;
-    this.currentSpawnDelay = this.baseSpawnDelay;
+    this.currentBaseSpawnDelayMs = 1000;
+    this.spawnDelayMultiplier = 1.0;
+    this.nextSpawnAtMs = 0;
+    this.lastSpawnDebugLog = 0;
 
     // Сбрасываем фазы
     this.runStartTime = 0;
     this.currentPhase = 1;
 
+    // Сбрасываем stage system
+    this.currentStage = 1;
+    this.stageStartTime = 0;
+    this.stageElapsedSec = 0;
+    this.burstState = "idle";
+    this.isStageClear = false;
+    this.nextBurstTime = 0;
+    this.burstEndTime = 0;
+    this.recoveryEndTime = 0;
+
+    // Убираем overlay, если есть
+    this.hideStageClearOverlay();
+
     // Клавиша рестарта
     this.restartKey = this.input.keyboard!.addKey(
       Phaser.Input.Keyboard.KeyCodes.R
+    );
+
+    // Клавиша продолжения (Enter)
+    this.continueKey = this.input.keyboard!.addKey(
+      Phaser.Input.Keyboard.KeyCodes.ENTER
     );
 
     // Переключатель debug (F1)
@@ -287,6 +346,13 @@ export class GameScene extends Phaser.Scene {
       color: "#ffffff",
     });
     this.updateXPText();
+
+    // Upgrade points display
+    this.upgradePointsText = this.add.text(16, 60, "", {
+      fontSize: "16px",
+      color: "#ffff00",
+    });
+    this.updateUpgradePointsText();
 
     // Временный лог порогов для проверки (только если debugLogs включен)
     if (this.debugLogs) {
@@ -401,6 +467,14 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
+    if (this.isStageClear) {
+      // Проверяем Enter для продолжения
+      if (Phaser.Input.Keyboard.JustDown(this.continueKey)) {
+        this.continueToNextStage();
+      }
+      return;
+    }
+
     // Обновление текущей фазы
     const elapsed = this.getElapsedSec();
     const phase = this.getPhaseNumber(elapsed);
@@ -408,22 +482,28 @@ export class GameScene extends Phaser.Scene {
       this.currentPhase = phase;
       // Обновляем статистику
       this.stats.phase = this.currentPhase;
-      this.updateSpawnTimerByPhase();
+      // Обновляем базовую задержку спавна (не пересоздаём таймер)
+      const settings = this.getPhaseSettings(this.currentPhase);
+      this.currentBaseSpawnDelayMs = settings.spawnDelayMs;
       // Опционально: обновить debug текст
       if (this.phaseText) {
-        const settings = this.getPhaseSettings(this.currentPhase);
         this.phaseText.setText(
           `PHASE: ${this.currentPhase} | Max: ${settings.maxAliveEnemies} | Delay: ${settings.spawnDelayMs}ms`
         );
       }
     }
 
-    if (this.player) {
+    // Обновление stage system
+    this.updateStageSystem(time);
+
+    if (this.player && !this.isStageClear) {
       this.player.update();
     }
 
-    this.handleShooting(time);
-    this.updateAmmoUI(time);
+    if (!this.isStageClear) {
+      this.handleShooting(time);
+      this.updateAmmoUI(time);
+    }
   }
 
   // ЛКМ → выстрел в сторону курсора
@@ -432,7 +512,8 @@ export class GameScene extends Phaser.Scene {
       this.gameOver ||
       !this.player.isAlive() ||
       !this.isStarted ||
-      this.isLevelUpOpen
+      this.isLevelUpOpen ||
+      this.isStageClear
     ) {
       return;
     }
@@ -462,8 +543,12 @@ export class GameScene extends Phaser.Scene {
       playerY: this.player.y,
       aimAngle,
       bullets: this.bullets,
-      onBulletSpawned: () => {
+      onBulletSpawned: (bullet: Bullet) => {
         this.stats.shotsFired++;
+        // Применяем pierce perk к пуле
+        if (this.playerPierceLevel > 0) {
+          bullet.pierceLeft = this.playerPierceLevel;
+        }
       },
     });
   }
@@ -517,18 +602,39 @@ export class GameScene extends Phaser.Scene {
         this.player,
         "runner",
         this.currentPhase,
-        this.enemies
+        this.enemies,
+        this.currentStage
       );
       this.enemies.add(enemy);
+
+      // Применяем stage speed multiplier
+      const stageSpeedMult = this.getStageSpeedMultiplier(this.currentStage);
+      enemy.setSpeedMultiplier(stageSpeedMult);
+
+      // Применяем burst speed boost к новому врагу, если сейчас burst
+      if (this.burstState === "burst") {
+        enemy.setSpeedMultiplier(stageSpeedMult * BURST_SPEED_BOOST);
+      }
       return;
     }
 
-    // 3) Выбор типа по весам
-    const totalWeight = settings.weights.runner + settings.weights.tank;
+    // 3) Выбор типа по весам (с учётом burst и stage)
+    let runnerWeight = settings.weights.runner;
+    let tankWeight = settings.weights.tank;
+
+    // Применяем stage modifier для веса танков
+    tankWeight = Math.round(tankWeight * this.getStageTankWeightMultiplier(this.currentStage));
+
+    // Во время burst увеличиваем вес runner
+    if (this.burstState === "burst") {
+      runnerWeight = Math.round(runnerWeight * BURST_RUNNER_WEIGHT_BOOST);
+    }
+
+    const totalWeight = runnerWeight + tankWeight;
     let roll = Phaser.Math.Between(1, totalWeight);
     let chosenType: EnemyType = "runner";
 
-    if (roll <= settings.weights.runner) {
+    if (roll <= runnerWeight) {
       chosenType = "runner";
     } else {
       chosenType = "tank";
@@ -571,9 +677,19 @@ export class GameScene extends Phaser.Scene {
       this.player,
       chosenType,
       this.currentPhase,
-      this.enemies
+      this.enemies,
+      this.currentStage
     );
     this.enemies.add(enemy);
+
+    // Применяем stage speed multiplier
+    const stageSpeedMult = this.getStageSpeedMultiplier(this.currentStage);
+    enemy.setSpeedMultiplier(stageSpeedMult);
+
+    // Применяем burst speed boost к новому врагу, если сейчас burst
+    if (this.burstState === "burst") {
+      enemy.setSpeedMultiplier(stageSpeedMult * BURST_SPEED_BOOST);
+    }
   }
 
   // Пуля попала во врага
@@ -588,11 +704,13 @@ export class GameScene extends Phaser.Scene {
     const bullet = bulletObj as Bullet;
     const enemy = enemyObj as Enemy;
 
-    // Защита от двойного overlap: отключаем body пули перед destroy
-    const bulletBody = bullet.body as Phaser.Physics.Arcade.Body | undefined;
-    if (bulletBody) {
-      bulletBody.enable = false;
+    // Защита от повторного попадания в того же врага (для pierce)
+    if (bullet.hasHitEnemy(enemy)) {
+      return;
     }
+
+    // Помечаем врага как обработанного
+    bullet.markEnemyHit(enemy);
 
     // Визуальный фидбек до уничтожения пули
     enemy.applyHitFeedback(bullet.x, bullet.y, this.time.now);
@@ -604,8 +722,18 @@ export class GameScene extends Phaser.Scene {
     const totalDamage = this.player.getDamage();
     const killed = enemy.takeDamage(totalDamage);
 
-    // Пуля всегда исчезает при попадании
-    bullet.destroy();
+    // Проверяем pierce: если пуля может пробить, уменьшаем счётчик и не уничтожаем
+    if (bullet.pierceLeft > 0) {
+      bullet.pierceLeft--;
+      // Пуля продолжает полёт и может попасть в другого врага
+    } else {
+      // Пуля не может пробить - уничтожаем её
+      const bulletBody = bullet.body as Phaser.Physics.Arcade.Body | undefined;
+      if (bulletBody) {
+        bulletBody.enable = false;
+      }
+      bullet.destroy();
+    }
 
     if (killed) {
       // Микро hit-stop
@@ -629,6 +757,11 @@ export class GameScene extends Phaser.Scene {
 
       this.addXP(1);
       this.maybeDropLoot(enemy.x, enemy.y);
+      // 2% шанс выпадения weapon-drop
+      if (Math.random() < 0.02) {
+        const weaponLoot = new LootPickup(this, enemy.x, enemy.y, "weapon-drop");
+        this.loot.add(weaponLoot);
+      }
     }
   }
 
@@ -641,6 +774,10 @@ export class GameScene extends Phaser.Scene {
       | Phaser.Types.Physics.Arcade.GameObjectWithBody
       | Phaser.Tilemaps.Tile
   ) {
+    if (this.isStageClear) {
+      return;
+    }
+
     const player = playerObj as Player;
     const enemy = enemyObj as Enemy;
 
@@ -713,6 +850,55 @@ export class GameScene extends Phaser.Scene {
     };
   }
 
+  // Stage-based modifiers
+  private getStageSpawnDelayMultiplier(stage: number): number {
+    // Уменьшаем задержку спавна на 6% за стадию (спавн быстрее)
+    // Минимум 0.6 (не быстрее чем в 1.67 раза)
+    return Math.max(0.6, Math.pow(0.94, stage - 1));
+  }
+
+  private getStageTankWeightMultiplier(stage: number): number {
+    // Увеличиваем вес танков на 8% за стадию
+    return Math.pow(1.08, stage - 1);
+  }
+
+  private getStageSpeedMultiplier(stage: number): number {
+    // Увеличиваем скорость врагов на 2% за стадию
+    // Максимум 1.3 (не быстрее чем в 1.3 раза)
+    return Math.min(1.3, 1.0 + (stage - 1) * 0.02);
+  }
+
+  private applyStageSpeedToEnemies(): void {
+    // Применяем stage speed multiplier ко всем активным врагам
+    const mult = this.getStageSpeedMultiplier(this.currentStage);
+    const children = this.enemies.getChildren();
+    for (let i = 0; i < children.length; i++) {
+      const enemy = children[i] as Enemy;
+      if (enemy && enemy.active) {
+        const isDying = (enemy as any).isDying;
+        if (!isDying) {
+          // Если сейчас burst, учитываем burst multiplier
+          const finalMult = this.burstState === "burst" ? mult * BURST_SPEED_BOOST : mult;
+          enemy.setSpeedMultiplier(finalMult);
+        }
+      }
+    }
+  }
+
+  private getStageRunnerHP(stage: number): number {
+    // runner: 1 HP до стадии 4, затем 2 до стадии 7, затем 3
+    if (stage >= 7) return 3;
+    if (stage >= 4) return 2;
+    return 1;
+  }
+
+  private getStageTankHP(stage: number): number {
+    // tank: 3 HP до стадии 4, затем 4 до стадии 7, затем 5
+    if (stage >= 7) return 5;
+    if (stage >= 4) return 4;
+    return 3;
+  }
+
   private getAliveTanksCount(): number {
     let count = 0;
     this.enemies.getChildren().forEach((obj) => {
@@ -725,9 +911,9 @@ export class GameScene extends Phaser.Scene {
   }
 
   private getXPToNextLevel(level: number): number {
-    // Линейная формула: 4 + level * 2
+    // Линейная формула: 6 + (level - 1) * 2
     // lvl1->2: 6, lvl2->3: 8, lvl3->4: 10, и т.д.
-    return 4 + level * 2;
+    return Math.max(6, 6 + (level - 1) * 2);
   }
 
   private addXP(amount: number) {
@@ -746,8 +932,12 @@ export class GameScene extends Phaser.Scene {
       // Обновляем статистику
       this.stats.level = this.level;
 
+      // Начисляем очки прокачки вместо показа overlay
+      this.upgradePoints += 1;
+      this.updateUpgradePointsText();
+
       this.onLevelUp();
-      this.showLevelUpOverlay();
+      // Убрали showLevelUpOverlay() - теперь прокачка только между стадиями
     }
   }
 
@@ -760,211 +950,18 @@ export class GameScene extends Phaser.Scene {
     this.player.onLevelUp(this.level);
   }
 
-  private showLevelUpOverlay() {
-    if (this.isLevelUpOpen) {
-      return;
-    }
-
-    this.isLevelUpOpen = true;
-
-    // Пауза игры
-    this.physics.pause();
-    this.time.timeScale = 0;
-
-    const options: LevelUpOption[] = this.getAvailableLevelUpOptions();
-
-    new LevelUpOverlay(this, options, () => {
-      // Закрыли overlay — продолжаем игру
-      this.isLevelUpOpen = false;
-      this.time.timeScale = 1;
-      this.physics.resume();
-
-      // ВАЖНО: сбросить состояние кнопки мыши,
-      // чтобы удержание/клик не превратился в автоматический выстрел сразу после закрытия
-      this.input.activePointer.isDown = false;
-    });
-  }
-
-  private getAvailableLevelUpOptions(): LevelUpOption[] {
-    const all: LevelUpOption[] = [];
-
-    // 1) Handling апгрейды пистолета (только если текущее оружие - пистолет)
-    if (this.weapon.key === "pistol") {
-      const gun = this.weapon as BasicGun;
-
-      if (gun.canDecreaseFireRate(40)) {
-        all.push({
-          title: "FIRE RATE -40ms",
-          description: "",
-          apply: () => {
-            gun.decreaseFireRate(40);
-          },
-        });
-      }
-
-      if (gun.canDecreaseReloadTime(150)) {
-        all.push({
-          title: "RELOAD -150ms",
-          description: "",
-          apply: () => {
-            gun.decreaseReloadTime(150);
-          },
-        });
-      }
-
-      if (gun.canIncreaseMagazine(1)) {
-        all.push({
-          title: "MAGAZINE +1",
-          description: "",
-          apply: () => {
-            gun.increaseMagazine(1);
-          },
-        });
-      }
-    }
-
-    // 2) Апгрейды игрока (movement-skill)
-    if (this.player.canIncreaseMoveSpeed()) {
-      all.push({
-        title: "MOVE SPEED +5%",
-        description: "",
-        apply: () => {
-          this.player.increaseMoveSpeed();
-        },
-      });
-    }
-
-    if (this.player.canIncreaseIFrames()) {
-      all.push({
-        title: "I-FRAMES +100ms",
-        description: "",
-        apply: () => {
-          this.player.increaseIFrames();
-        },
-      });
-    }
-
-    // Max HP (редко: 35% шанс добавить в пул)
-    if (this.player.canIncreaseMaxHp() && Math.random() < 0.35) {
-      all.push({
-        title: "MAX HP +1",
-        description: "",
-        apply: () => {
-          this.player.increaseMaxHp();
-          this.updateHealthText();
-        },
-      });
-    }
-
-    // 3) Новое оружие: SHOTGUN (только если level >= 6 и не shotgun уже)
-    if (this.level >= 6 && this.weapon.key !== "shotgun") {
-      if (Math.random() < 0.3) {
-        // 30% шанс добавить в пул
-        all.push({
-          title: "NEW WEAPON: SHOTGUN",
-          description: "",
-          apply: () => {
-            this.switchWeaponTo("shotgun");
-          },
-        });
-      }
-    }
-
-    // Перемешиваем основной пул
-    Phaser.Utils.Array.Shuffle(all);
-
-    // Берём первые 3
-    let selected = all.slice(0, 3);
-
-    // 4) Fallback логика: если меньше 3, добиваем fallback опциями
-    if (selected.length < 3) {
-      const fallbacks: LevelUpOption[] = [];
-
-      // HEAL +1 (если не полное HP)
-      if (this.player.getHealth() < this.player.getMaxHealth()) {
-        fallbacks.push({
-          title: "HEAL +1",
-          description: "",
-          apply: () => {
-            this.player.applyHeal(1);
-            this.updateHealthText();
-          },
-        });
-      }
-
-      // MAX HP +1 (если можно)
-      if (this.player.canIncreaseMaxHp()) {
-        fallbacks.push({
-          title: "MAX HP +1",
-          description: "",
-          apply: () => {
-            this.player.increaseMaxHp();
-            this.updateHealthText();
-          },
-        });
-      }
-
-      // NEW WEAPON (если доступно)
-      if (this.level >= 6 && this.weapon.key !== "shotgun") {
-        fallbacks.push({
-          title: "NEW WEAPON: SHOTGUN",
-          description: "",
-          apply: () => {
-            this.switchWeaponTo("shotgun");
-          },
-        });
-      }
-
-      // MOVE SPEED (если можно)
-      if (this.player.canIncreaseMoveSpeed()) {
-        fallbacks.push({
-          title: "MOVE SPEED +5%",
-          description: "",
-          apply: () => {
-            this.player.increaseMoveSpeed();
-          },
-        });
-      }
-
-      // I-FRAMES (если можно)
-      if (this.player.canIncreaseIFrames()) {
-        fallbacks.push({
-          title: "I-FRAMES +100ms",
-          description: "",
-          apply: () => {
-            this.player.increaseIFrames();
-          },
-        });
-      }
-
-      // Убираем дубликаты из fallbacks (те что уже в selected)
-      const selectedTitles = new Set(selected.map((opt) => opt.title));
-      const uniqueFallbacks = fallbacks.filter(
-        (opt) => !selectedTitles.has(opt.title)
-      );
-
-      // Добавляем fallbacks до 3 опций
-      selected = [...selected, ...uniqueFallbacks].slice(0, 3);
-    }
-
-    // 5) Если всё равно 0 (теоретически), показываем CONTINUE
-    if (selected.length === 0) {
-      selected.push({
-        title: "CONTINUE",
-        description: "",
-        apply: () => {
-          // Просто продолжаем игру
-        },
-      });
-    }
-
-    return selected;
-  }
+  // Убрали showLevelUpOverlay() - теперь прокачка только между стадиями через upgrade points
 
 
   private updateXPText() {
     const needed = this.getXPToNextLevel(this.level);
     this.xpText.setText(`LVL: ${this.level}  XP: ${this.xp}/${needed}`);
+  }
+
+  private updateUpgradePointsText() {
+    if (this.upgradePointsText) {
+      this.upgradePointsText.setText(`PTS: ${this.upgradePoints}`);
+    }
   }
 
   private updateAmmoUI(time: number) {
@@ -1005,7 +1002,9 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  private switchWeaponTo(key: "pistol" | "shotgun") {
+  // Метод для будущей реализации смены оружия при подборе weapon-drop
+  // Пока не используется, но оставлен для будущей реализации
+  private switchWeaponTo(key: "pistol" | "shotgun"): void {
     if (this.weapon?.key === key) {
       return;
     }
@@ -1025,49 +1024,95 @@ export class GameScene extends Phaser.Scene {
     this.updateAmmoUI(this.time.now);
   }
 
-  // updateSpawnTimer больше не используется - теперь используем updateSpawnTimerByPhase
-  // private updateSpawnTimer() {
-  //   if (this.gameOver) {
-  //     return;
-  //   }
-  //
-  //   if (this.spawnEvent) {
-  //     this.spawnEvent.remove(false);
-  //   }
-  //
-  //   this.spawnEvent = this.time.addEvent({
-  //     delay: this.currentSpawnDelay,
-  //     loop: true,
-  //     callback: this.spawnEnemy,
-  //     callbackScope: this,
-  //   });
-  // }
+  // ============================================
+  // STABLE SPAWN SCHEDULER
+  // ============================================
 
-  private updateSpawnTimerByPhase() {
-    if (this.gameOver || !this.isStarted) {
-      return;
+  private getSpawnMultiplier(): number {
+    if (this.burstState === "burst") {
+      return 1 - BURST_SPAWN_REDUCTION; // e.g. 0.55 (45% faster)
     }
+    if (this.burstState === "recovery") {
+      return RECOVERY_SPAWN_MULTIPLIER; // e.g. 1.2 (20% slower)
+    }
+    return 1.0;
+  }
 
+  private startSpawnScheduler(time: number): void {
+    // Останавливаем старый планировщик, если есть
+    this.stopSpawnScheduler();
+
+    // Получаем базовую задержку из текущих настроек фазы
     const settings = this.getPhaseSettings(this.currentPhase);
-    const delay = settings.spawnDelayMs;
+    this.currentBaseSpawnDelayMs = settings.spawnDelayMs;
 
-    // Если уже есть timer и delay совпадает — ничего не делать
-    if (this.spawnEvent && this.currentSpawnDelay === delay) {
+    // Получаем множитель из текущего состояния burst
+    this.spawnDelayMultiplier = this.getSpawnMultiplier();
+
+    // Устанавливаем время следующего спавна
+    this.nextSpawnAtMs = time + this.currentBaseSpawnDelayMs * this.spawnDelayMultiplier;
+
+    // Создаём стабильный looped timer, который тикает каждые 200ms
+    this.spawnTickEvent = this.time.addEvent({
+      delay: 200, // tick rate
+      loop: true,
+      callback: () => this.spawnTick(),
+    });
+  }
+
+  private stopSpawnScheduler(): void {
+    if (this.spawnTickEvent) {
+      this.spawnTickEvent.remove(false);
+      this.spawnTickEvent = undefined;
+    }
+  }
+
+  private spawnTick(): void {
+    if (this.gameOver || !this.isStarted || this.isStageClear) {
       return;
     }
 
-    // Иначе уничтожить старый timer и создать новый
-    if (this.spawnEvent) {
-      this.spawnEvent.remove(false);
+    const now = this.time.now;
+
+    // Проверяем, пора ли спавнить
+    if (now < this.nextSpawnAtMs) {
+      return;
     }
 
-    this.currentSpawnDelay = delay;
-    this.spawnEvent = this.time.addEvent({
-      delay: delay,
-      loop: true,
-      callback: this.spawnEnemy,
-      callbackScope: this,
-    });
+    // Проверяем лимит врагов
+    const settings = this.getPhaseSettings(this.currentPhase);
+    const alive = this.enemies.countActive(true);
+    if (alive >= settings.maxAliveEnemies) {
+      // Если достигнут лимит, откладываем следующий спавн на короткое время
+      this.nextSpawnAtMs = now + 500; // проверяем каждые 500ms
+      return;
+    }
+
+    // Спавним врага
+    this.spawnEnemy();
+
+    // Пересчитываем базовую задержку (на случай смены фазы)
+    const currentSettings = this.getPhaseSettings(this.currentPhase);
+    let baseDelay = currentSettings.spawnDelayMs;
+    // Применяем stage modifier
+    baseDelay = baseDelay * this.getStageSpawnDelayMultiplier(this.currentStage);
+    baseDelay = Math.max(MIN_SPAWN_DELAY_MS, baseDelay);
+    this.currentBaseSpawnDelayMs = baseDelay;
+
+    // Пересчитываем множитель (на случай смены burst/recovery)
+    this.spawnDelayMultiplier = this.getSpawnMultiplier();
+
+    // Устанавливаем время следующего спавна
+    this.nextSpawnAtMs = now + this.currentBaseSpawnDelayMs * this.spawnDelayMultiplier;
+
+    // Временный debug лог (только если debugLogs включен)
+    if (this.debugLogs && now - this.lastSpawnDebugLog >= 5000) {
+      this.lastSpawnDebugLog = now;
+      const nextIn = Math.max(0, this.nextSpawnAtMs - now);
+      console.log(
+        `[SPAWNDBG] alive=${alive} nextIn=${nextIn.toFixed(0)}ms state=${this.burstState} mult=${this.spawnDelayMultiplier.toFixed(2)}`
+      );
+    }
   }
 
   private maybeDropLoot(x: number, y: number) {
@@ -1111,6 +1156,10 @@ export class GameScene extends Phaser.Scene {
       | Phaser.Types.Physics.Arcade.GameObjectWithBody
       | Phaser.Tilemaps.Tile
   ) {
+    if (this.isStageClear) {
+      return;
+    }
+
     const loot = lootObj as LootPickup;
 
     switch (loot.lootType) {
@@ -1122,6 +1171,10 @@ export class GameScene extends Phaser.Scene {
       case "speed":
         this.player.applySpeedBoost(1.5, 4000); // x1.5 на 4 секунды
         this.stats.speedPicked++;
+        break;
+      case "weapon-drop":
+        console.log("[LOOT] weapon-drop picked");
+        this.onWeaponDropPicked();
         break;
     }
 
@@ -1138,9 +1191,8 @@ export class GameScene extends Phaser.Scene {
     // Печатаем статистику при Game Over
     this.printMatchSummary("GAME_OVER");
 
-    if (this.spawnEvent) {
-      this.spawnEvent.remove(false);
-    }
+    // Останавливаем планировщик спавна
+    this.stopSpawnScheduler();
 
     this.physics.pause();
 
@@ -1176,13 +1228,23 @@ export class GameScene extends Phaser.Scene {
     this.runStartTime = this.time.now;
     this.currentPhase = 1;
 
+    // Инициализируем stage system
+    this.currentStage = 1;
+    this.stageStartTime = this.time.now;
+    this.stageElapsedSec = 0;
+    this.burstState = "idle";
+    this.scheduleNextBurst();
+
     // Обновляем статистику при старте
     this.stats.startedAtMs = this.time.now;
     this.stats.weaponStart = this.weapon.getStats().name;
     this.stats.weaponCurrent = this.weapon.getStats().name;
 
-    // Стартуем спавн по фазе
-    this.updateSpawnTimerByPhase();
+    // Стартуем стабильный планировщик спавна
+    this.startSpawnScheduler(this.time.now);
+
+    // Логируем начало stage
+    console.log(`[STAGE] START stage=${this.currentStage}`);
 
     // Опционально: debug текст фазы
     if (this.debugEnabled) {
@@ -1295,5 +1357,684 @@ export class GameScene extends Phaser.Scene {
       `Player: damageTaken=${this.stats.damageTaken}, heals=${this.stats.healsPicked}, speed=${this.stats.speedPicked}`
     );
     console.groupEnd();
+  }
+
+  // ============================================
+  // STAGE SYSTEM
+  // ============================================
+
+  private updateStageSystem(time: number): void {
+    if (!this.isStarted || this.gameOver) {
+      return;
+    }
+
+    // Обновляем время стадии
+    this.stageElapsedSec = (time - this.stageStartTime) / 1000;
+
+    // Проверяем завершение стадии
+    if (this.stageElapsedSec >= STAGE_DURATION_SEC) {
+      this.endStage(true);
+      this.onStageClear();
+      return;
+    }
+
+    // Обновляем burst cycle
+    this.updateBurstCycle(time);
+  }
+
+
+  private endStage(survived: boolean): void {
+    console.log(`[STAGE] END stage=${this.currentStage} survived=${survived}`);
+  }
+
+  private onStageClear(): void {
+    if (this.gameOver || !this.isStarted || this.isStageClear) {
+      return;
+    }
+
+    this.isStageClear = true;
+
+    // Останавливаем спавн
+    this.stopSpawnScheduler();
+
+    // Замораживаем физику
+    this.physics.world.pause();
+
+    // Останавливаем движение игрока
+    if (this.player && this.player.body) {
+      const playerBody = this.player.body as Phaser.Physics.Arcade.Body;
+      playerBody.setVelocity(0, 0);
+    }
+
+    // Останавливаем движение всех врагов
+    const enemies = this.enemies.getChildren();
+    for (let i = 0; i < enemies.length; i++) {
+      const enemy = enemies[i] as Enemy;
+      if (enemy && enemy.body) {
+        const enemyBody = enemy.body as Phaser.Physics.Arcade.Body;
+        enemyBody.setVelocity(0, 0);
+      }
+    }
+
+    // Показываем overlay
+    this.showStageClearOverlay();
+
+    console.log(`[STAGE] CLEAR stage=${this.currentStage}`);
+  }
+
+  private showStageClearOverlay(): void {
+    this.showStageClearPerkStep();
+  }
+
+  private showStageClearPerkStep(): void {
+    const { width, height } = this.scale;
+
+    // Затемняющий фон
+    const bg = this.add
+      .rectangle(width / 2, height / 2, width, height, 0x000000, 0.9)
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(30000)
+      .setInteractive({ useHandCursor: false });
+
+    // Заголовок
+    const title = this.add
+      .text(width / 2, height / 2 - 180, `STAGE ${this.currentStage} CLEAR`, {
+        fontSize: "56px",
+        color: "#ffffff",
+        fontStyle: "bold",
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(30001);
+
+    // Подзаголовок
+    const subtitle = this.add
+      .text(width / 2, height / 2 - 130, "Pick one perk", {
+        fontSize: "24px",
+        color: "#cccccc",
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(30001);
+
+    // Получаем 3 перка для выбора
+    const perks = this.getStageClearPerks();
+
+    // Адаптивный layout: вертикально на узких экранах, горизонтально на широких
+    const isNarrow = width < 900;
+    const cardObjects: Phaser.GameObjects.GameObject[] = [];
+    
+    let cardW: number;
+    let cardH: number;
+    let cardGap: number;
+    let cardsStartX: number;
+    let cardsStartY: number;
+
+    if (isNarrow) {
+      // Вертикальный layout
+      cardW = Math.min(560, width - 80);
+      cardH = 90;
+      cardGap = 18;
+      cardsStartX = width / 2;
+      cardsStartY = height / 2 - 60;
+    } else {
+      // Горизонтальный layout
+      cardW = Math.min(420, (width - 160) / 3);
+      cardH = 100;
+      cardGap = 20;
+      cardsStartX = width / 2 - (cardW + cardGap);
+      cardsStartY = height / 2 - 20;
+    }
+
+    perks.forEach((perk, i) => {
+      let cardX: number;
+      let cardY: number;
+
+      if (isNarrow) {
+        // Вертикальное расположение
+        cardX = cardsStartX;
+        cardY = cardsStartY + i * (cardH + cardGap);
+      } else {
+        // Горизонтальное расположение
+        cardX = cardsStartX + i * (cardW + cardGap);
+        cardY = cardsStartY;
+      }
+
+      const card = this.add
+        .rectangle(cardX, cardY, cardW, cardH, 0x2a2a2a, 1)
+        .setOrigin(0.5)
+        .setScrollFactor(0)
+        .setDepth(30001)
+        .setInteractive({ useHandCursor: true })
+        .setStrokeStyle(2, 0xffffff, 0.2);
+
+      const cardText = this.add
+        .text(cardX, cardY, perk.title, {
+          fontSize: isNarrow ? "20px" : "24px",
+          color: "#ffffff",
+          fontStyle: "bold",
+        })
+        .setOrigin(0.5)
+        .setScrollFactor(0)
+        .setDepth(30002);
+
+      // Hover эффект
+      card.on("pointerover", () => {
+        card.setFillStyle(0x3a3a3a, 1);
+        card.setScale(1.05);
+      });
+      card.on("pointerout", () => {
+        card.setFillStyle(0x2a2a2a, 1);
+        card.setScale(1);
+      });
+
+      // Обработчик клика
+      card.on(
+        "pointerdown",
+        (
+          _pointer: Phaser.Input.Pointer,
+          _x: number,
+          _y: number,
+          event: any
+        ) => {
+          if (event?.stopPropagation) {
+            event.stopPropagation();
+          }
+          perk.apply();
+          // Переходим к шагу прокачки
+          this.hideStageClearOverlay();
+          this.showStageClearUpgradesStep();
+        }
+      );
+
+      cardObjects.push(card, cardText);
+    });
+
+    this.stageClearOverlay = this.add.container(0, 0, [
+      bg,
+      title,
+      subtitle,
+      ...cardObjects,
+    ]);
+    this.stageClearOverlay.setDepth(30000);
+    this.stageClearOverlay.setScrollFactor(0);
+  }
+
+  private showStageClearUpgradesStep(): void {
+    const { width, height } = this.scale;
+
+    // Затемняющий фон
+    const bg = this.add
+      .rectangle(width / 2, height / 2, width, height, 0x000000, 0.9)
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(30000)
+      .setInteractive({ useHandCursor: false });
+
+    // Заголовок
+    const title = this.add
+      .text(width / 2, height / 2 - 200, "UPGRADES", {
+        fontSize: "48px",
+        color: "#ffffff",
+        fontStyle: "bold",
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(30001);
+
+    // Показываем очки
+    const pointsText = this.add
+      .text(width / 2, height / 2 - 150, `POINTS: ${this.upgradePoints}`, {
+        fontSize: "28px",
+        color: "#ffff00",
+        fontStyle: "bold",
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(30001);
+
+    // Адаптивный layout
+    const isNarrow = width < 900;
+    const upgradeObjects: Phaser.GameObjects.GameObject[] = [];
+
+    const upgrades = [
+      {
+        title: "FIRE RATE -20ms",
+        canApply: () => {
+          if (this.upgradePoints <= 0) return false;
+          if (this.weapon.key === "pistol") {
+            const gun = this.weapon as BasicGun;
+            return gun.canDecreaseFireRate(20);
+          }
+          return false;
+        },
+        apply: () => {
+          if (this.weapon.key === "pistol") {
+            const gun = this.weapon as BasicGun;
+            gun.decreaseFireRate(20);
+          }
+          this.upgradePoints--;
+          this.updateUpgradePointsText();
+          pointsText.setText(`POINTS: ${this.upgradePoints}`);
+          this.refreshUpgradeButtons(upgradeObjects, upgrades, isNarrow, width, height, pointsText);
+        },
+      },
+      {
+        title: "RELOAD -100ms",
+        canApply: () => {
+          if (this.upgradePoints <= 0) return false;
+          if (this.weapon.key === "pistol") {
+            const gun = this.weapon as BasicGun;
+            return gun.canDecreaseReloadTime(100);
+          }
+          return false;
+        },
+        apply: () => {
+          if (this.weapon.key === "pistol") {
+            const gun = this.weapon as BasicGun;
+            gun.decreaseReloadTime(100);
+          }
+          this.upgradePoints--;
+          this.updateUpgradePointsText();
+          pointsText.setText(`POINTS: ${this.upgradePoints}`);
+          this.refreshUpgradeButtons(upgradeObjects, upgrades, isNarrow, width, height, pointsText);
+        },
+      },
+      {
+        title: "MAX HP +1",
+        canApply: () => {
+          if (this.upgradePoints <= 0) return false;
+          return this.player.canIncreaseMaxHp();
+        },
+        apply: () => {
+          this.player.increaseMaxHp();
+          this.updateHealthText();
+          this.upgradePoints--;
+          this.updateUpgradePointsText();
+          pointsText.setText(`POINTS: ${this.upgradePoints}`);
+          this.refreshUpgradeButtons(upgradeObjects, upgrades, isNarrow, width, height, pointsText);
+        },
+      },
+      {
+        title: "MOVE +5%",
+        canApply: () => {
+          if (this.upgradePoints <= 0) return false;
+          return this.player.canIncreaseMoveSpeed();
+        },
+        apply: () => {
+          this.player.increaseMoveSpeed();
+          this.upgradePoints--;
+          this.updateUpgradePointsText();
+          pointsText.setText(`POINTS: ${this.upgradePoints}`);
+          this.refreshUpgradeButtons(upgradeObjects, upgrades, isNarrow, width, height, pointsText);
+        },
+      },
+    ];
+
+    this.createUpgradeButtons(upgrades, isNarrow, width, height, upgradeObjects);
+
+    // Кнопка CONTINUE
+    const continueY = isNarrow ? height / 2 + 200 : height / 2 + 180;
+    const continueBtn = this.add
+      .rectangle(width / 2, continueY, 200, 60, 0x2a2a2a, 1)
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(30001)
+      .setInteractive({ useHandCursor: true })
+      .setStrokeStyle(2, 0xffffff, 0.3);
+
+    const continueText = this.add
+      .text(width / 2, continueY, "CONTINUE", {
+        fontSize: "24px",
+        color: "#ffffff",
+        fontStyle: "bold",
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(30002);
+
+    continueBtn.on("pointerover", () => {
+      continueBtn.setFillStyle(0x3a3a3a, 1);
+    });
+    continueBtn.on("pointerout", () => {
+      continueBtn.setFillStyle(0x2a2a2a, 1);
+    });
+    continueBtn.on(
+      "pointerdown",
+      (
+        _pointer: Phaser.Input.Pointer,
+        _x: number,
+        _y: number,
+        event: any
+      ) => {
+        if (event?.stopPropagation) {
+          event.stopPropagation();
+        }
+        this.continueToNextStage();
+      }
+    );
+
+    upgradeObjects.push(bg, title, pointsText, continueBtn, continueText);
+
+    this.stageClearOverlay = this.add.container(0, 0, upgradeObjects);
+    this.stageClearOverlay.setDepth(30000);
+    this.stageClearOverlay.setScrollFactor(0);
+  }
+
+  private createUpgradeButtons(
+    upgrades: Array<{
+      title: string;
+      canApply: () => boolean;
+      apply: () => void;
+    }>,
+    isNarrow: boolean,
+    width: number,
+    height: number,
+    upgradeObjects: Phaser.GameObjects.GameObject[]
+  ): void {
+    const cardW = isNarrow ? Math.min(480, width - 80) : 220;
+    const cardH = 70;
+    const cardGap = isNarrow ? 16 : 20;
+    const startY = height / 2 - 80;
+
+    upgrades.forEach((upgrade, i) => {
+      const cardY = isNarrow
+        ? startY + i * (cardH + cardGap)
+        : startY;
+      const cardX = isNarrow
+        ? width / 2
+        : width / 2 - 330 + i * (cardW + cardGap);
+
+      const canApply = upgrade.canApply();
+      const card = this.add
+        .rectangle(cardX, cardY, cardW, cardH, canApply ? 0x2a2a2a : 0x1a1a1a, 1)
+        .setOrigin(0.5)
+        .setScrollFactor(0)
+        .setDepth(30001)
+        .setInteractive({ useHandCursor: canApply })
+        .setStrokeStyle(2, canApply ? 0xffffff : 0x666666, 0.2);
+
+      const cardText = this.add
+        .text(cardX, cardY, upgrade.title, {
+          fontSize: isNarrow ? "18px" : "20px",
+          color: canApply ? "#ffffff" : "#888888",
+          fontStyle: "bold",
+        })
+        .setOrigin(0.5)
+        .setScrollFactor(0)
+        .setDepth(30002);
+
+      if (canApply) {
+        card.on("pointerover", () => {
+          card.setFillStyle(0x3a3a3a, 1);
+          card.setScale(1.05);
+        });
+        card.on("pointerout", () => {
+          card.setFillStyle(0x2a2a2a, 1);
+          card.setScale(1);
+        });
+        card.on(
+          "pointerdown",
+          (
+            _pointer: Phaser.Input.Pointer,
+            _x: number,
+            _y: number,
+            event: any
+          ) => {
+            if (event?.stopPropagation) {
+              event.stopPropagation();
+            }
+            upgrade.apply();
+          }
+        );
+      }
+
+      upgradeObjects.push(card, cardText);
+    });
+  }
+
+  private refreshUpgradeButtons(
+    upgradeObjects: Phaser.GameObjects.GameObject[],
+    upgrades: Array<{
+      title: string;
+      canApply: () => boolean;
+      apply: () => void;
+    }>,
+    isNarrow: boolean,
+    width: number,
+    height: number,
+    pointsText: Phaser.GameObjects.Text
+  ): void {
+    // Удаляем старые кнопки (кроме bg, title, pointsText, continueBtn, continueText)
+    const toKeep = 5; // bg, title, pointsText, continueBtn, continueText
+    while (upgradeObjects.length > toKeep) {
+      const obj = upgradeObjects.pop();
+      if (obj) obj.destroy();
+    }
+
+    // Создаём новые кнопки
+    this.createUpgradeButtons(upgrades, isNarrow, width, height, upgradeObjects);
+
+    // Обновляем контейнер
+    if (this.stageClearOverlay) {
+      this.stageClearOverlay.destroy(true);
+    }
+    this.stageClearOverlay = this.add.container(0, 0, upgradeObjects);
+    this.stageClearOverlay.setDepth(30000);
+    this.stageClearOverlay.setScrollFactor(0);
+    
+    // Обновляем pointsText (он уже в upgradeObjects)
+    pointsText.setText(`POINTS: ${this.upgradePoints}`);
+  }
+
+  private getStageClearPerks(): LevelUpOption[] {
+    const all: LevelUpOption[] = [];
+
+    // 1) PIERCE +1
+    all.push({
+      title: "PIERCE +1",
+      description: "",
+      apply: () => {
+        this.playerPierceLevel++;
+      },
+    });
+
+    // 2) KNOCKBACK +25%
+    all.push({
+      title: "KNOCKBACK +25%",
+      description: "",
+      apply: () => {
+        this.player.increaseKnockbackMultiplier(0.25);
+      },
+    });
+
+    // 3) MAGNET +20%
+    all.push({
+      title: "MAGNET +20%",
+      description: "",
+      apply: () => {
+        this.player.increaseLootPickupRadiusMultiplier(0.2);
+      },
+    });
+
+    // 4) HEAL ON CLEAR
+    all.push({
+      title: "HEAL ON CLEAR",
+      description: "",
+      apply: () => {
+        this.player.applyHeal(1);
+        this.updateHealthText();
+      },
+    });
+
+    // 5) BULLET SIZE +30% (опционально, если нужно больше опций)
+    all.push({
+      title: "BULLET SIZE +30%",
+      description: "",
+      apply: () => {
+        // Увеличиваем размер пуль (scale)
+        // Это будет применяться при создании пуль
+        // Пока просто добавляем флаг, можно реализовать позже
+      },
+    });
+
+    // Перемешиваем и берём 3 уникальных перка
+    Phaser.Utils.Array.Shuffle(all);
+    return all.slice(0, 3);
+  }
+
+  private hideStageClearOverlay(): void {
+    if (this.stageClearOverlay) {
+      this.stageClearOverlay.destroy(true);
+      this.stageClearOverlay = undefined;
+    }
+  }
+
+  private onWeaponDropPicked(): void {
+    // TODO: Реализовать смену оружия при подборе weapon-drop
+    // Пока только логируем
+    // В будущем здесь будет вызов: this.switchWeaponTo("newWeaponType");
+    // Временно вызываем метод, чтобы TypeScript не считал его неиспользуемым
+    void this.switchWeaponTo;
+  }
+
+  private continueToNextStage(): void {
+    if (!this.isStageClear) {
+      return;
+    }
+
+    this.isStageClear = false;
+    this.hideStageClearOverlay();
+
+    // Возобновляем физику
+    this.physics.world.resume();
+
+    // Переходим к следующей стадии
+    const now = this.time.now;
+    this.currentStage++;
+    this.stageStartTime = now;
+    this.stageElapsedSec = 0;
+    this.burstState = "idle";
+    this.scheduleNextBurst();
+
+    // Применяем stage speed multiplier ко всем врагам
+    this.applyStageSpeedToEnemies();
+
+    // Запускаем спавн
+    this.startSpawnScheduler(now);
+
+    // Логируем параметры стадии
+    const settings = this.getPhaseSettings(this.currentPhase);
+    const spawnDelay = this.currentBaseSpawnDelayMs;
+    const runnerHP = this.getStageRunnerHP(this.currentStage);
+    const tankHP = this.getStageTankHP(this.currentStage);
+    const speedMult = this.getStageSpeedMultiplier(this.currentStage);
+    const tankWeight = Math.round(
+      settings.weights.tank * this.getStageTankWeightMultiplier(this.currentStage)
+    );
+    console.log(
+      `[STAGE] START stage=${this.currentStage} (spawnDelay=${spawnDelay.toFixed(0)}ms, weights=runner:${settings.weights.runner}/tank:${tankWeight}, hpRunner=${runnerHP}, hpTank=${tankHP}, speedMul=${speedMult.toFixed(2)})`
+    );
+  }
+
+  private scheduleNextBurst(): void {
+    const intervalSec = Phaser.Math.Between(
+      BURST_INTERVAL_MIN_SEC,
+      BURST_INTERVAL_MAX_SEC
+    );
+    this.nextBurstTime = this.time.now + intervalSec * 1000;
+  }
+
+  private updateBurstCycle(time: number): void {
+    if (this.burstState === "idle") {
+      // Проверяем, пора ли начать burst
+      if (time >= this.nextBurstTime) {
+        this.startBurst(time);
+      }
+    } else if (this.burstState === "burst") {
+      // Проверяем, пора ли закончить burst
+      if (time >= this.burstEndTime) {
+        this.endBurst(time);
+      }
+    } else if (this.burstState === "recovery") {
+      // Проверяем, пора ли закончить recovery
+      if (time >= this.recoveryEndTime) {
+        this.endRecovery();
+      }
+    }
+  }
+
+  private startBurst(time: number): void {
+    this.burstState = "burst";
+    const durationSec = Phaser.Math.Between(
+      BURST_DURATION_MIN_SEC,
+      BURST_DURATION_MAX_SEC
+    );
+    this.burstEndTime = time + durationSec * 1000;
+
+    // Обновляем множитель спавна (не пересоздаём таймер)
+    this.spawnDelayMultiplier = this.getSpawnMultiplier();
+
+    // Немедленно применяем burst эффект: "подтягиваем" следующий спавн ближе
+    const base = this.getPhaseSettings(this.currentPhase).spawnDelayMs;
+    const mult = this.getSpawnMultiplier();
+    const desired = time + base * mult;
+    this.nextSpawnAtMs = Math.min(this.nextSpawnAtMs, desired);
+
+    // Применяем speed boost ко всем активным врагам
+    this.applyBurstSpeedToEnemies(true);
+
+    console.log(
+      `[BURST] START t=${this.stageElapsedSec.toFixed(1)}s duration=${durationSec.toFixed(1)}s`
+    );
+  }
+
+  private endBurst(time: number): void {
+    this.burstState = "recovery";
+    const recoverySec = Phaser.Math.Between(
+      RECOVERY_DURATION_MIN_SEC,
+      RECOVERY_DURATION_MAX_SEC
+    );
+    this.recoveryEndTime = time + recoverySec * 1000;
+
+    // Убираем speed boost
+    this.applyBurstSpeedToEnemies(false);
+
+    // Обновляем множитель спавна (не пересоздаём таймер)
+    this.spawnDelayMultiplier = this.getSpawnMultiplier();
+
+    // Немедленно применяем recovery эффект: "отодвигаем" следующий спавн дальше
+    const base = this.getPhaseSettings(this.currentPhase).spawnDelayMs;
+    const mult = this.getSpawnMultiplier();
+    const desired = time + base * mult;
+    this.nextSpawnAtMs = Math.max(this.nextSpawnAtMs, desired);
+
+    console.log(`[BURST] END`);
+  }
+
+  private endRecovery(): void {
+    this.burstState = "idle";
+    this.scheduleNextBurst();
+
+    // Обновляем множитель спавна (не пересоздаём таймер)
+    this.spawnDelayMultiplier = this.getSpawnMultiplier();
+  }
+
+  private applyBurstSpeedToEnemies(apply: boolean): void {
+    const children = this.enemies.getChildren();
+    const stageMult = this.getStageSpeedMultiplier(this.currentStage);
+    for (let i = 0; i < children.length; i++) {
+      const enemy = children[i] as Enemy;
+      if (enemy && enemy.active) {
+        // Проверяем isDying через приватное поле (через any для доступа)
+        const isDying = (enemy as any).isDying;
+        if (!isDying) {
+          const baseMult = stageMult;
+          const finalMult = apply ? baseMult * BURST_SPEED_BOOST : baseMult;
+          enemy.setSpeedMultiplier(finalMult);
+        }
+      }
+    }
   }
 }
