@@ -26,6 +26,7 @@ export interface Weapon {
     aimAngle: number;
     bullets: Phaser.Physics.Arcade.Group;
     onBulletSpawned?: (bullet: import("../entities/Bullet").Bullet) => void;
+    bypassAmmo?: boolean; // DOUBLE buff: infinite ammo
   }): void;
 
   refillAndReset(): void; // после смены оружия/рестарта

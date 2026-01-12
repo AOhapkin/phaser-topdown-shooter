@@ -71,6 +71,30 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
     this.speedMultiplier = multiplier;
   }
 
+  public setFrozen(isFrozen: boolean): void {
+    this.frozen = isFrozen;
+    const body = this.body as Phaser.Physics.Arcade.Body;
+    
+    if (isFrozen) {
+      // Замораживаем: останавливаем движение и применяем визуальный эффект
+      body.setVelocity(0, 0);
+      this.setTint(0x88ccff); // Ледяной цвет
+      this.setAlpha(0.7);
+    } else {
+      // Размораживаем: восстанавливаем нормальный вид
+      if (this.baseTint !== undefined) {
+        this.setTint(this.baseTint);
+      } else {
+        this.clearTint();
+      }
+      this.setAlpha(this.baseAlpha);
+    }
+  }
+
+  public isFrozen(): boolean {
+    return this.frozen;
+  }
+
   private computeMaxHealth(): number {
     // Используем stage для HP scaling (каждые 3 стадии)
     if (this.type === "runner") {
@@ -127,6 +151,9 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
 
   // Death animation
   private isDying = false;
+
+  // Freeze state
+  private frozen = false;
 
   constructor(
     scene: Phaser.Scene,
@@ -221,6 +248,13 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
     }
 
     if (!this.scene || !this.active || !this.target || !this.target.active) {
+      return;
+    }
+
+    // Если заморожен - не обрабатываем движение (velocity уже установлен в 0 в setFrozen)
+    if (this.frozen) {
+      const body = this.body as Phaser.Physics.Arcade.Body;
+      body.setVelocity(0, 0);
       return;
     }
 

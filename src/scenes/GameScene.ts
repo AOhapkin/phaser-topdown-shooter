@@ -55,6 +55,34 @@ const BURST_RUNNER_WEIGHT_BOOST = 1.3; // 30% boost to runner weight
 const BURST_SPEED_BOOST = 1.12; // 12% speed increase
 const RECOVERY_SPAWN_MULTIPLIER = 1.2; // 20% slower spawn (multiply delay by 1.2)
 
+// Weapon-drop spawn constraints
+const WEAPON_DROP_BASE_CHANCE = 0.003; // 0.3% per enemy death
+const WEAPON_DROP_COOLDOWN_MS = 30000; // 30 seconds cooldown
+
+// Buff durations (ms)
+const BUFF_RAPID_DURATION_MS = 8000;
+const BUFF_DOUBLE_DURATION_MS = 10000;
+const BUFF_FREEZE_DURATION_MS = 6000;
+const BUFF_MAX_DURATION_MS = 20000; // Cap for stacking
+
+// Buff spawn chances (PIERCE removed - only available via Stage Clear perk)
+const BUFF_RAPID_CHANCE = 0.012; // 1.2%
+const BUFF_DOUBLE_CHANCE = 0.009; // 0.9%
+const BUFF_FREEZE_CHANCE = 0.006; // 0.6%
+
+// Max active buff loot on map
+const MAX_ACTIVE_BUFF_LOOT = 2;
+
+// Global cooldown for buff drops (ms)
+const BUFF_DROP_COOLDOWN_MS = 12000;
+
+// Buff types
+type BuffType = "rapid" | "double" | "pierce" | "freeze";
+type ActiveBuff = {
+  type: BuffType;
+  endTime: number; // When buff expires
+};
+
 type MatchStats = {
   startedAtMs: number;
   endedAtMs: number | null;
@@ -126,7 +154,6 @@ export class GameScene extends Phaser.Scene {
   private bullets!: Phaser.Physics.Arcade.Group;
   private enemies!: Phaser.Physics.Arcade.Group;
 
-
   private score = 0;
   private scoreText!: Phaser.GameObjects.Text;
   private healthText!: Phaser.GameObjects.Text;
@@ -186,9 +213,18 @@ export class GameScene extends Phaser.Scene {
   // Stage Clear perks
   private playerPierceLevel = 0; // Сколько врагов может пробить пуля
 
-  // Upgrade points system
-  private upgradePoints = 0; // Очки для прокачки между стадиями
-  private upgradePointsText?: Phaser.GameObjects.Text;
+  // Weapon-drop constraints
+  private lastWeaponDropTime = 0; // Time when weapon-drop was spawned or picked
+
+  // Buff loot tracking
+  private lastBuffDropTime = 0; // Time when last buff loot was dropped
+  private activeBuffLoot = new Set<LootPickup>(); // Track active buff loot items
+
+  // Active buffs system
+  private activeBuffs = new Map<BuffType, ActiveBuff>();
+  private buffHudText?: Phaser.GameObjects.Text;
+  private lastBuffHudUpdate = 0;
+  private enemySpeedMultiplier = 1.0; // Global enemy speed multiplier (for freeze buff)
 
   constructor() {
     super("GameScene");
@@ -347,12 +383,14 @@ export class GameScene extends Phaser.Scene {
     });
     this.updateXPText();
 
-    // Upgrade points display
-    this.upgradePointsText = this.add.text(16, 60, "", {
-      fontSize: "16px",
+    // Buff HUD (top-right, under health)
+    this.buffHudText = this.add.text(width - 16, 40, "", {
+      fontSize: "14px",
       color: "#ffff00",
+      align: "right",
     });
-    this.updateUpgradePointsText();
+    this.buffHudText.setOrigin(1, 0);
+    this.updateBuffHud();
 
     // Временный лог порогов для проверки (только если debugLogs включен)
     if (this.debugLogs) {
@@ -384,13 +422,7 @@ export class GameScene extends Phaser.Scene {
     this.reloadProgressBarBg.setVisible(false);
 
     // Сам прогресс-бар
-    this.reloadProgressBar = this.add.rectangle(
-      16,
-      ammoY + 25,
-      0,
-      8,
-      0xff6b6b
-    );
+    this.reloadProgressBar = this.add.rectangle(16, ammoY + 25, 0, 8, 0xff6b6b);
     this.reloadProgressBar.setOrigin(0, 0);
     this.reloadProgressBar.setScrollFactor(0);
     this.reloadProgressBar.setVisible(false);
@@ -437,12 +469,7 @@ export class GameScene extends Phaser.Scene {
     // Обработчик клика с stopPropagation
     this.startOverlay.on(
       "pointerdown",
-      (
-        _p: Phaser.Input.Pointer,
-        _lx: number,
-        _ly: number,
-        event: any
-      ) => {
+      (_p: Phaser.Input.Pointer, _lx: number, _ly: number, event: any) => {
         if (event?.stopPropagation) {
           event.stopPropagation();
         }
@@ -495,6 +522,15 @@ export class GameScene extends Phaser.Scene {
 
     // Обновление stage system
     this.updateStageSystem(time);
+    this.updateBuffs(time);
+    this.updateBuffHud(time);
+
+    // Clean up inactive buff loot from tracking
+    this.activeBuffLoot.forEach((loot) => {
+      if (!loot || !loot.active) {
+        this.activeBuffLoot.delete(loot);
+      }
+    });
 
     if (this.player && !this.isStageClear) {
       this.player.update();
@@ -536,21 +572,101 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
+    // Apply RAPID buff: reduce fire rate by 50%
+    const rapidActive = this.activeBuffs.has("rapid");
+    const baseFireRate = this.weapon.getStats().fireRateMs;
+    const effectiveFireRate = rapidActive ? baseFireRate * 0.5 : baseFireRate;
+
+    // Check fire rate with buff
+    const weaponLastShot = (this.weapon as any).lastShotTime || 0;
+    if (time < weaponLastShot + effectiveFireRate) {
+      return;
+    }
+
+    // DOUBLE buff: weapon-specific behavior
+    const doubleActive = this.activeBuffs.has("double");
+    const isShotgun = this.weapon.key === "shotgun";
+    const weapon = this.weapon as any;
+
+    // Track if first shot succeeded
+    let firstShotSucceeded = false;
+
+    // DOUBLE buff: bypass ammo/reload (infinite ammo)
+    const bypassAmmo = doubleActive;
+
+    // First shot: use weapon.tryFire (handles ammo, reload, fireRate update)
     this.weapon.tryFire({
       scene: this,
       time,
       playerX: this.player.x,
       playerY: this.player.y,
-      aimAngle,
+      aimAngle: aimAngle,
       bullets: this.bullets,
+      bypassAmmo: bypassAmmo,
       onBulletSpawned: (bullet: Bullet) => {
+        firstShotSucceeded = true;
         this.stats.shotsFired++;
-        // Применяем pierce perk к пуле
+        // Применяем pierce perk к пуле (only from Stage Clear perk)
         if (this.playerPierceLevel > 0) {
           bullet.pierceLeft = this.playerPierceLevel;
         }
       },
     });
+
+    // DOUBLE buff: weapon-specific second shot
+    if (doubleActive && firstShotSucceeded && !weapon._isReloading) {
+      if (isShotgun) {
+        // Shotgun: schedule second shot after 100ms delay (bypassAmmo for DOUBLE)
+        this.time.delayedCall(100, () => {
+          // Check buff still active and weapon still ready (bypassAmmo means no ammo check needed)
+          if (
+            !this.activeBuffs.has("double") ||
+            (weapon._isReloading && !bypassAmmo)
+          ) {
+            return;
+          }
+          // Fire second shotgun shot (bypassAmmo=true for DOUBLE)
+          this.weapon.tryFire({
+            scene: this,
+            time: this.time.now,
+            playerX: this.player.x,
+            playerY: this.player.y,
+            aimAngle: aimAngle,
+            bullets: this.bullets,
+            bypassAmmo: true, // DOUBLE buff: infinite ammo
+            onBulletSpawned: (bullet: Bullet) => {
+              this.stats.shotsFired++;
+              // Apply pierce perk (only from Stage Clear perk)
+              if (this.playerPierceLevel > 0) {
+                bullet.pierceLeft = this.playerPierceLevel;
+              }
+            },
+          });
+        });
+      } else {
+        // Pistol: spawn second bullet immediately with spread (no extra ammo cost)
+        const spreadAngle = 0.08; // +/- 0.08 rad for double shot
+        const bulletAngle = aimAngle + spreadAngle;
+        const bullet = new Bullet(this, this.player.x, this.player.y);
+        this.bullets.add(bullet);
+
+        // Count as fired
+        this.stats.shotsFired++;
+
+        // Apply pierce perk (only from Stage Clear perk)
+        if (this.playerPierceLevel > 0) {
+          bullet.pierceLeft = this.playerPierceLevel;
+        }
+
+        // Set velocity
+        const speed = bullet.speed;
+        const vx = Math.cos(bulletAngle) * speed;
+        const vy = Math.sin(bulletAngle) * speed;
+        const body = bullet.body as Phaser.Physics.Arcade.Body;
+        body.setVelocity(vx, vy);
+        body.setAllowGravity(false);
+      }
+    }
   }
 
   // Спавн врага по краям экрана
@@ -609,12 +725,10 @@ export class GameScene extends Phaser.Scene {
 
       // Применяем stage speed multiplier
       const stageSpeedMult = this.getStageSpeedMultiplier(this.currentStage);
-      enemy.setSpeedMultiplier(stageSpeedMult);
-
-      // Применяем burst speed boost к новому врагу, если сейчас burst
-      if (this.burstState === "burst") {
-        enemy.setSpeedMultiplier(stageSpeedMult * BURST_SPEED_BOOST);
-      }
+      const burstMult = this.burstState === "burst" ? BURST_SPEED_BOOST : 1.0;
+      enemy.setSpeedMultiplier(
+        stageSpeedMult * burstMult * this.enemySpeedMultiplier
+      );
       return;
     }
 
@@ -623,7 +737,9 @@ export class GameScene extends Phaser.Scene {
     let tankWeight = settings.weights.tank;
 
     // Применяем stage modifier для веса танков
-    tankWeight = Math.round(tankWeight * this.getStageTankWeightMultiplier(this.currentStage));
+    tankWeight = Math.round(
+      tankWeight * this.getStageTankWeightMultiplier(this.currentStage)
+    );
 
     // Во время burst увеличиваем вес runner
     if (this.burstState === "burst") {
@@ -684,11 +800,15 @@ export class GameScene extends Phaser.Scene {
 
     // Применяем stage speed multiplier
     const stageSpeedMult = this.getStageSpeedMultiplier(this.currentStage);
-    enemy.setSpeedMultiplier(stageSpeedMult);
+    const burstMult = this.burstState === "burst" ? BURST_SPEED_BOOST : 1.0;
+    enemy.setSpeedMultiplier(
+      stageSpeedMult * burstMult * this.enemySpeedMultiplier
+    );
 
-    // Применяем burst speed boost к новому врагу, если сейчас burst
-    if (this.burstState === "burst") {
-      enemy.setSpeedMultiplier(stageSpeedMult * BURST_SPEED_BOOST);
+    // Если FREEZE активен - замораживаем нового врага
+    if (this.activeBuffs.has("freeze")) {
+      enemy.setFrozen(true);
+      console.log(`[BUFF] freeze applied to spawned enemy`);
     }
   }
 
@@ -709,7 +829,7 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    // Помечаем врага как обработанного
+    // Помечаем врага как обработанного (до любых других операций)
     bullet.markEnemyHit(enemy);
 
     // Визуальный фидбек до уничтожения пули
@@ -723,12 +843,12 @@ export class GameScene extends Phaser.Scene {
     const killed = enemy.takeDamage(totalDamage);
 
     // Проверяем pierce: если пуля может пробить, уменьшаем счётчик и не уничтожаем
+    const bulletBody = bullet.body as Phaser.Physics.Arcade.Body | undefined;
     if (bullet.pierceLeft > 0) {
       bullet.pierceLeft--;
       // Пуля продолжает полёт и может попасть в другого врага
     } else {
-      // Пуля не может пробить - уничтожаем её
-      const bulletBody = bullet.body as Phaser.Physics.Arcade.Body | undefined;
+      // Пуля не может пробить - отключаем коллайдер и уничтожаем
       if (bulletBody) {
         bulletBody.enable = false;
       }
@@ -757,11 +877,10 @@ export class GameScene extends Phaser.Scene {
 
       this.addXP(1);
       this.maybeDropLoot(enemy.x, enemy.y);
-      // 2% шанс выпадения weapon-drop
-      if (Math.random() < 0.02) {
-        const weaponLoot = new LootPickup(this, enemy.x, enemy.y, "weapon-drop");
-        this.loot.add(weaponLoot);
-      }
+      // Weapon-drop spawn with constraints
+      this.maybeSpawnWeaponDrop(enemy.x, enemy.y);
+      // Buff loot spawn
+      this.maybeSpawnBuffLoot(enemy.x, enemy.y);
     }
   }
 
@@ -878,7 +997,8 @@ export class GameScene extends Phaser.Scene {
         const isDying = (enemy as any).isDying;
         if (!isDying) {
           // Если сейчас burst, учитываем burst multiplier
-          const finalMult = this.burstState === "burst" ? mult * BURST_SPEED_BOOST : mult;
+          const finalMult =
+            this.burstState === "burst" ? mult * BURST_SPEED_BOOST : mult;
           enemy.setSpeedMultiplier(finalMult);
         }
       }
@@ -932,9 +1052,7 @@ export class GameScene extends Phaser.Scene {
       // Обновляем статистику
       this.stats.level = this.level;
 
-      // Начисляем очки прокачки вместо показа overlay
-      this.upgradePoints += 1;
-      this.updateUpgradePointsText();
+      // Level up без показа overlay - прокачка только через перки между стадиями
 
       this.onLevelUp();
       // Убрали showLevelUpOverlay() - теперь прокачка только между стадиями
@@ -950,18 +1068,11 @@ export class GameScene extends Phaser.Scene {
     this.player.onLevelUp(this.level);
   }
 
-  // Убрали showLevelUpOverlay() - теперь прокачка только между стадиями через upgrade points
-
+  // Убрали showLevelUpOverlay() - теперь прокачка только через перки между стадиями
 
   private updateXPText() {
     const needed = this.getXPToNextLevel(this.level);
     this.xpText.setText(`LVL: ${this.level}  XP: ${this.xp}/${needed}`);
-  }
-
-  private updateUpgradePointsText() {
-    if (this.upgradePointsText) {
-      this.upgradePointsText.setText(`PTS: ${this.upgradePoints}`);
-    }
   }
 
   private updateAmmoUI(time: number) {
@@ -1050,7 +1161,8 @@ export class GameScene extends Phaser.Scene {
     this.spawnDelayMultiplier = this.getSpawnMultiplier();
 
     // Устанавливаем время следующего спавна
-    this.nextSpawnAtMs = time + this.currentBaseSpawnDelayMs * this.spawnDelayMultiplier;
+    this.nextSpawnAtMs =
+      time + this.currentBaseSpawnDelayMs * this.spawnDelayMultiplier;
 
     // Создаём стабильный looped timer, который тикает каждые 200ms
     this.spawnTickEvent = this.time.addEvent({
@@ -1095,7 +1207,8 @@ export class GameScene extends Phaser.Scene {
     const currentSettings = this.getPhaseSettings(this.currentPhase);
     let baseDelay = currentSettings.spawnDelayMs;
     // Применяем stage modifier
-    baseDelay = baseDelay * this.getStageSpawnDelayMultiplier(this.currentStage);
+    baseDelay =
+      baseDelay * this.getStageSpawnDelayMultiplier(this.currentStage);
     baseDelay = Math.max(MIN_SPAWN_DELAY_MS, baseDelay);
     this.currentBaseSpawnDelayMs = baseDelay;
 
@@ -1103,14 +1216,17 @@ export class GameScene extends Phaser.Scene {
     this.spawnDelayMultiplier = this.getSpawnMultiplier();
 
     // Устанавливаем время следующего спавна
-    this.nextSpawnAtMs = now + this.currentBaseSpawnDelayMs * this.spawnDelayMultiplier;
+    this.nextSpawnAtMs =
+      now + this.currentBaseSpawnDelayMs * this.spawnDelayMultiplier;
 
     // Временный debug лог (только если debugLogs включен)
     if (this.debugLogs && now - this.lastSpawnDebugLog >= 5000) {
       this.lastSpawnDebugLog = now;
       const nextIn = Math.max(0, this.nextSpawnAtMs - now);
       console.log(
-        `[SPAWNDBG] alive=${alive} nextIn=${nextIn.toFixed(0)}ms state=${this.burstState} mult=${this.spawnDelayMultiplier.toFixed(2)}`
+        `[SPAWNDBG] alive=${alive} nextIn=${nextIn.toFixed(0)}ms state=${
+          this.burstState
+        } mult=${this.spawnDelayMultiplier.toFixed(2)}`
       );
     }
   }
@@ -1144,8 +1260,93 @@ export class GameScene extends Phaser.Scene {
     const children = this.loot?.getChildren?.() ?? [];
     return children.some((obj) => {
       const loot = obj as LootPickup;
-      return loot.lootType === type;
+      return loot.active && loot.lootType === type;
     });
+  }
+
+  private maybeSpawnWeaponDrop(x: number, y: number): void {
+    const now = this.time.now;
+
+    // Проверка cooldown
+    if (now - this.lastWeaponDropTime < WEAPON_DROP_COOLDOWN_MS) {
+      return;
+    }
+
+    // Проверка: уже есть активный weapon-drop на карте
+    if (this.hasLootOfType("weapon-drop")) {
+      return;
+    }
+
+    // Базовый шанс выпадения
+    if (Math.random() >= WEAPON_DROP_BASE_CHANCE) {
+      return;
+    }
+
+    // Спавним weapon-drop (also has TTL via LootPickup)
+    const weaponLoot = new LootPickup(this, x, y, "weapon-drop");
+    this.loot.add(weaponLoot);
+    this.lastWeaponDropTime = now;
+
+    // Log weapon drop with TTL
+    const ttlMs = Phaser.Math.Between(8000, 12000);
+    console.log(`[LOOT] weapon-drop dropped: ttl=${ttlMs}ms`);
+  }
+
+  private maybeSpawnBuffLoot(x: number, y: number): void {
+    const now = this.time.now;
+
+    // 1) Global cooldown check
+    if (now - this.lastBuffDropTime < BUFF_DROP_COOLDOWN_MS) {
+      console.log(`[LOOT] buff drop skipped (cooldown)`);
+      return;
+    }
+
+    // 2) Limit active buff loot items (max 2)
+    const activeBuffLootCount = Array.from(this.activeBuffLoot).filter(
+      (loot) => loot && loot.active
+    ).length;
+    if (activeBuffLootCount >= MAX_ACTIVE_BUFF_LOOT) {
+      console.log(`[LOOT] buff drop skipped (limit)`);
+      return;
+    }
+
+    // 3) Roll for buff type (PIERCE removed - only available via Stage Clear)
+    const roll = Math.random();
+    let buffType: LootType | null = null;
+
+    // Total chance: RAPID + DOUBLE + FREEZE (PIERCE removed)
+    const totalChance =
+      BUFF_RAPID_CHANCE + BUFF_DOUBLE_CHANCE + BUFF_FREEZE_CHANCE;
+
+    if (roll < BUFF_RAPID_CHANCE) {
+      buffType = "buff-rapid";
+    } else if (roll < BUFF_RAPID_CHANCE + BUFF_DOUBLE_CHANCE) {
+      buffType = "buff-double";
+    } else if (roll < totalChance) {
+      buffType = "buff-freeze";
+    } else {
+      // No buff drop
+      return;
+    }
+
+    // 4) Do not drop a buff if that buff is currently active
+    const buffKey = buffType.replace("buff-", "") as BuffType;
+    if (this.activeBuffs.has(buffKey)) {
+      console.log(`[LOOT] buff drop skipped (active: ${buffKey})`);
+      return;
+    }
+
+    // 5) Spawn buff loot
+    const buffLoot = new LootPickup(this, x, y, buffType);
+    this.loot.add(buffLoot);
+    this.activeBuffLoot.add(buffLoot);
+
+    // Calculate TTL for logging
+    const ttlMs = Phaser.Math.Between(8000, 12000);
+    console.log(`[LOOT] buff dropped: ${buffType} ttl=${ttlMs}ms`);
+
+    // Update cooldown
+    this.lastBuffDropTime = now;
   }
 
   private handlePlayerPickupLoot(
@@ -1174,11 +1375,209 @@ export class GameScene extends Phaser.Scene {
         break;
       case "weapon-drop":
         console.log("[LOOT] weapon-drop picked");
+        this.lastWeaponDropTime = this.time.now; // Обновляем cooldown при подборе
         this.onWeaponDropPicked();
+        break;
+      case "buff-rapid":
+        this.applyBuff("rapid", BUFF_RAPID_DURATION_MS);
+        break;
+      case "buff-double":
+        this.applyBuff("double", BUFF_DOUBLE_DURATION_MS);
+        break;
+      // PIERCE removed from loot - only available via Stage Clear perk
+      case "buff-freeze":
+        this.applyBuff("freeze", BUFF_FREEZE_DURATION_MS);
         break;
     }
 
+    // Remove from tracking if it's a buff loot or weapon-drop
+    if (loot.lootType.startsWith("buff-") || loot.lootType === "weapon-drop") {
+      this.activeBuffLoot.delete(loot);
+    }
+
     loot.destroy();
+  }
+
+  // ============================================
+  // BUFF SYSTEM
+  // ============================================
+
+  private applyBuff(type: BuffType, durationMs: number): void {
+    const now = this.time.now;
+    const existing = this.activeBuffs.get(type);
+
+    if (existing) {
+      // DOUBLE: refresh duration only (no stacking)
+      // Other buffs: extend duration (cap at BUFF_MAX_DURATION_MS)
+      if (type === "double") {
+        const newEndTime = now + durationMs;
+        const remaining = durationMs;
+        this.activeBuffs.set(type, { type, endTime: newEndTime });
+        console.log(
+          `[BUFF] refresh type=${type} remain=${remaining.toFixed(0)}ms`
+        );
+      } else {
+        const newEndTime = Math.min(
+          existing.endTime + durationMs,
+          now + BUFF_MAX_DURATION_MS
+        );
+        const remaining = newEndTime - now;
+        this.activeBuffs.set(type, { type, endTime: newEndTime });
+        console.log(
+          `[BUFF] extend type=${type} remain=${remaining.toFixed(0)}ms`
+        );
+
+        // Re-apply effects if needed (for freeze, re-apply to all enemies)
+        if (type === "freeze") {
+          this.applyFreezeToAllEnemies();
+        }
+      }
+    } else {
+      // Start new buff
+      const endTime = now + durationMs;
+      this.activeBuffs.set(type, { type, endTime });
+      console.log(`[BUFF] start type=${type} dur=${durationMs}ms`);
+
+      // Apply immediate effects
+      if (type === "freeze") {
+        this.applyFreezeToAllEnemies();
+      } else if (type === "double") {
+        console.log(`[BUFF] double: reload bypass enabled`);
+      }
+    }
+  }
+
+  private updateBuffs(time: number): void {
+    const expired: BuffType[] = [];
+
+    for (const [type, buff] of this.activeBuffs.entries()) {
+      if (time >= buff.endTime) {
+        expired.push(type);
+      }
+    }
+
+    for (const type of expired) {
+      this.activeBuffs.delete(type);
+      console.log(`[BUFF] end type=${type}`);
+
+      // Remove effects
+      if (type === "freeze") {
+        this.removeFreezeFromAllEnemies();
+      } else if (type === "double") {
+        // DOUBLE ended: restore normal ammo behavior
+        // Ensure ammo is valid (refill if needed)
+        const weapon = this.weapon as any;
+        if (weapon.ammo !== undefined && weapon.ammo <= 0) {
+          weapon.refillAndReset();
+        }
+      }
+    }
+  }
+
+  private applyEnemySpeedMultiplier(): void {
+    if (!this.enemies) {
+      return;
+    }
+    try {
+      const children = this.enemies.getChildren();
+      if (children && Array.isArray(children)) {
+        children.forEach((obj) => {
+          const enemy = obj as Enemy;
+          if (enemy && enemy.active && !enemy.isFrozen()) {
+            const stageSpeedMult = this.getStageSpeedMultiplier(
+              this.currentStage
+            );
+            const burstMult =
+              this.burstState === "burst" ? BURST_SPEED_BOOST : 1.0;
+            enemy.setSpeedMultiplier(
+              stageSpeedMult * burstMult * this.enemySpeedMultiplier
+            );
+          }
+        });
+      }
+    } catch (e) {
+      // Group not fully initialized, ignore
+    }
+  }
+
+  private applyFreezeToAllEnemies(): void {
+    if (!this.enemies) {
+      return; // enemies group not initialized yet
+    }
+    try {
+      let count = 0;
+      const children = this.enemies.getChildren();
+      if (children && Array.isArray(children)) {
+        children.forEach((obj) => {
+          const enemy = obj as Enemy;
+          if (enemy && enemy.active && !(enemy as any).isDying) {
+            enemy.setFrozen(true);
+            count++;
+          }
+        });
+      }
+      console.log(`[BUFF] freeze applied to ${count} enemies`);
+    } catch (e) {
+      // Group not fully initialized, ignore
+    }
+  }
+
+  private removeFreezeFromAllEnemies(): void {
+    if (!this.enemies) {
+      return; // enemies group not initialized yet
+    }
+    try {
+      let count = 0;
+      const children = this.enemies.getChildren();
+      if (children && Array.isArray(children)) {
+        children.forEach((obj) => {
+          const enemy = obj as Enemy;
+          if (enemy && enemy.active) {
+            enemy.setFrozen(false);
+            count++;
+          }
+        });
+      }
+      // Restore speed multiplier after unfreeze
+      this.enemySpeedMultiplier = 1.0;
+      if (this.enemies) {
+        this.applyEnemySpeedMultiplier();
+      }
+      if (count > 0) {
+        console.log(`[BUFF] freeze removed from ${count} enemies`);
+      }
+    } catch (e) {
+      // Group not fully initialized, ignore
+    }
+  }
+
+  private updateBuffHud(time?: number): void {
+    if (!this.buffHudText) return;
+
+    // Update every 200ms to avoid string churn
+    if (time !== undefined) {
+      if (time - this.lastBuffHudUpdate < 200) {
+        return;
+      }
+      this.lastBuffHudUpdate = time;
+    }
+
+    if (this.activeBuffs.size === 0) {
+      this.buffHudText.setText("");
+      return;
+    }
+
+    const now = time ?? this.time.now;
+    const lines: string[] = [];
+
+    for (const [type, buff] of this.activeBuffs.entries()) {
+      const remaining = Math.max(0, buff.endTime - now);
+      const seconds = (remaining / 1000).toFixed(1);
+      const typeUpper = type.toUpperCase();
+      lines.push(`${typeUpper} ${seconds}s`);
+    }
+
+    this.buffHudText.setText(lines.join("\n"));
   }
 
   private handleGameOver() {
@@ -1187,6 +1586,14 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.gameOver = true;
+
+    // Clear buff loot tracking on game over
+    this.activeBuffLoot.forEach((loot) => {
+      if (loot && loot.active) {
+        loot.destroy();
+      }
+    });
+    this.activeBuffLoot.clear();
 
     // Печатаем статистику при Game Over
     this.printMatchSummary("GAME_OVER");
@@ -1300,6 +1707,22 @@ export class GameScene extends Phaser.Scene {
   }
 
   private resetMatchStats(): void {
+    // Clear all buffs and unfreeze enemies on restart
+    this.activeBuffs.clear();
+    this.enemySpeedMultiplier = 1.0;
+    // Only remove freeze if enemies group is initialized
+    if (this.enemies) {
+      this.removeFreezeFromAllEnemies();
+    }
+
+    // Clear buff loot tracking and destroy all buff loot items
+    this.activeBuffLoot.forEach((loot) => {
+      if (loot && loot.active) {
+        loot.destroy();
+      }
+    });
+    this.activeBuffLoot.clear();
+    this.lastBuffDropTime = 0;
     this.stats = {
       startedAtMs: this.time.now,
       endedAtMs: null,
@@ -1320,9 +1743,7 @@ export class GameScene extends Phaser.Scene {
     };
   }
 
-  private printMatchSummary(
-    reason: "GAME_OVER" | "RESTART" | "MANUAL"
-  ): void {
+  private printMatchSummary(reason: "GAME_OVER" | "RESTART" | "MANUAL"): void {
     // Обновляем текущие значения
     this.stats.score = this.score;
     this.stats.level = this.level;
@@ -1334,21 +1755,36 @@ export class GameScene extends Phaser.Scene {
       this.stats.endedAtMs = this.time.now;
     }
 
-    const durationSec =
-      (this.stats.endedAtMs - this.stats.startedAtMs) / 1000;
+    const durationSec = (this.stats.endedAtMs - this.stats.startedAtMs) / 1000;
+    // Проверка: hit не должен превышать fired
+    if (this.stats.shotsHit > this.stats.shotsFired) {
+      console.warn(
+        `[STATS BUG] hit > fired: fired=${this.stats.shotsFired}, hit=${this.stats.shotsHit}, weapon=${this.stats.weaponCurrent}`
+      );
+      // Исправляем: hit не может быть больше fired
+      this.stats.shotsHit = Math.min(
+        this.stats.shotsHit,
+        this.stats.shotsFired
+      );
+    }
+
     const accuracy =
       this.stats.shotsFired > 0
         ? (this.stats.shotsHit / this.stats.shotsFired) * 100
         : 0;
 
     console.groupCollapsed(
-      `[MATCH] ${reason} | ${durationSec.toFixed(1)}s | score=${this.stats.score} lvl=${this.stats.level} phase=${this.stats.phase}`
+      `[MATCH] ${reason} | ${durationSec.toFixed(1)}s | score=${
+        this.stats.score
+      } lvl=${this.stats.level} phase=${this.stats.phase}`
     );
     console.log(
       `Weapon: ${this.stats.weaponStart} -> ${this.stats.weaponCurrent} (switches: ${this.stats.weaponSwitches})`
     );
     console.log(
-      `Shots: fired=${this.stats.shotsFired}, hit=${this.stats.shotsHit}, acc=${accuracy.toFixed(1)}%`
+      `Shots: fired=${this.stats.shotsFired}, hit=${
+        this.stats.shotsHit
+      }, acc=${accuracy.toFixed(1)}%`
     );
     console.log(
       `Kills: total=${this.stats.killsTotal} (runner=${this.stats.killsRunner}, tank=${this.stats.killsTank})`
@@ -1382,12 +1818,19 @@ export class GameScene extends Phaser.Scene {
     this.updateBurstCycle(time);
   }
 
-
   private endStage(survived: boolean): void {
     console.log(`[STAGE] END stage=${this.currentStage} survived=${survived}`);
   }
 
   private onStageClear(): void {
+    // Clear buff loot tracking on stage clear
+    this.activeBuffLoot.forEach((loot) => {
+      if (loot && loot.active) {
+        loot.destroy();
+      }
+    });
+    this.activeBuffLoot.clear();
+    this.lastBuffDropTime = 0;
     if (this.gameOver || !this.isStarted || this.isStageClear) {
       return;
     }
@@ -1464,7 +1907,7 @@ export class GameScene extends Phaser.Scene {
     // Адаптивный layout: вертикально на узких экранах, горизонтально на широких
     const isNarrow = width < 900;
     const cardObjects: Phaser.GameObjects.GameObject[] = [];
-    
+
     let cardW: number;
     let cardH: number;
     let cardGap: number;
@@ -1542,9 +1985,8 @@ export class GameScene extends Phaser.Scene {
             event.stopPropagation();
           }
           perk.apply();
-          // Переходим к шагу прокачки
-          this.hideStageClearOverlay();
-          this.showStageClearUpgradesStep();
+          // Переходим к следующей стадии
+          this.continueToNextStage();
         }
       );
 
@@ -1559,273 +2001,6 @@ export class GameScene extends Phaser.Scene {
     ]);
     this.stageClearOverlay.setDepth(30000);
     this.stageClearOverlay.setScrollFactor(0);
-  }
-
-  private showStageClearUpgradesStep(): void {
-    const { width, height } = this.scale;
-
-    // Затемняющий фон
-    const bg = this.add
-      .rectangle(width / 2, height / 2, width, height, 0x000000, 0.9)
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setDepth(30000)
-      .setInteractive({ useHandCursor: false });
-
-    // Заголовок
-    const title = this.add
-      .text(width / 2, height / 2 - 200, "UPGRADES", {
-        fontSize: "48px",
-        color: "#ffffff",
-        fontStyle: "bold",
-      })
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setDepth(30001);
-
-    // Показываем очки
-    const pointsText = this.add
-      .text(width / 2, height / 2 - 150, `POINTS: ${this.upgradePoints}`, {
-        fontSize: "28px",
-        color: "#ffff00",
-        fontStyle: "bold",
-      })
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setDepth(30001);
-
-    // Адаптивный layout
-    const isNarrow = width < 900;
-    const upgradeObjects: Phaser.GameObjects.GameObject[] = [];
-
-    const upgrades = [
-      {
-        title: "FIRE RATE -20ms",
-        canApply: () => {
-          if (this.upgradePoints <= 0) return false;
-          if (this.weapon.key === "pistol") {
-            const gun = this.weapon as BasicGun;
-            return gun.canDecreaseFireRate(20);
-          }
-          return false;
-        },
-        apply: () => {
-          if (this.weapon.key === "pistol") {
-            const gun = this.weapon as BasicGun;
-            gun.decreaseFireRate(20);
-          }
-          this.upgradePoints--;
-          this.updateUpgradePointsText();
-          pointsText.setText(`POINTS: ${this.upgradePoints}`);
-          this.refreshUpgradeButtons(upgradeObjects, upgrades, isNarrow, width, height, pointsText);
-        },
-      },
-      {
-        title: "RELOAD -100ms",
-        canApply: () => {
-          if (this.upgradePoints <= 0) return false;
-          if (this.weapon.key === "pistol") {
-            const gun = this.weapon as BasicGun;
-            return gun.canDecreaseReloadTime(100);
-          }
-          return false;
-        },
-        apply: () => {
-          if (this.weapon.key === "pistol") {
-            const gun = this.weapon as BasicGun;
-            gun.decreaseReloadTime(100);
-          }
-          this.upgradePoints--;
-          this.updateUpgradePointsText();
-          pointsText.setText(`POINTS: ${this.upgradePoints}`);
-          this.refreshUpgradeButtons(upgradeObjects, upgrades, isNarrow, width, height, pointsText);
-        },
-      },
-      {
-        title: "MAX HP +1",
-        canApply: () => {
-          if (this.upgradePoints <= 0) return false;
-          return this.player.canIncreaseMaxHp();
-        },
-        apply: () => {
-          this.player.increaseMaxHp();
-          this.updateHealthText();
-          this.upgradePoints--;
-          this.updateUpgradePointsText();
-          pointsText.setText(`POINTS: ${this.upgradePoints}`);
-          this.refreshUpgradeButtons(upgradeObjects, upgrades, isNarrow, width, height, pointsText);
-        },
-      },
-      {
-        title: "MOVE +5%",
-        canApply: () => {
-          if (this.upgradePoints <= 0) return false;
-          return this.player.canIncreaseMoveSpeed();
-        },
-        apply: () => {
-          this.player.increaseMoveSpeed();
-          this.upgradePoints--;
-          this.updateUpgradePointsText();
-          pointsText.setText(`POINTS: ${this.upgradePoints}`);
-          this.refreshUpgradeButtons(upgradeObjects, upgrades, isNarrow, width, height, pointsText);
-        },
-      },
-    ];
-
-    this.createUpgradeButtons(upgrades, isNarrow, width, height, upgradeObjects);
-
-    // Кнопка CONTINUE
-    const continueY = isNarrow ? height / 2 + 200 : height / 2 + 180;
-    const continueBtn = this.add
-      .rectangle(width / 2, continueY, 200, 60, 0x2a2a2a, 1)
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setDepth(30001)
-      .setInteractive({ useHandCursor: true })
-      .setStrokeStyle(2, 0xffffff, 0.3);
-
-    const continueText = this.add
-      .text(width / 2, continueY, "CONTINUE", {
-        fontSize: "24px",
-        color: "#ffffff",
-        fontStyle: "bold",
-      })
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setDepth(30002);
-
-    continueBtn.on("pointerover", () => {
-      continueBtn.setFillStyle(0x3a3a3a, 1);
-    });
-    continueBtn.on("pointerout", () => {
-      continueBtn.setFillStyle(0x2a2a2a, 1);
-    });
-    continueBtn.on(
-      "pointerdown",
-      (
-        _pointer: Phaser.Input.Pointer,
-        _x: number,
-        _y: number,
-        event: any
-      ) => {
-        if (event?.stopPropagation) {
-          event.stopPropagation();
-        }
-        this.continueToNextStage();
-      }
-    );
-
-    upgradeObjects.push(bg, title, pointsText, continueBtn, continueText);
-
-    this.stageClearOverlay = this.add.container(0, 0, upgradeObjects);
-    this.stageClearOverlay.setDepth(30000);
-    this.stageClearOverlay.setScrollFactor(0);
-  }
-
-  private createUpgradeButtons(
-    upgrades: Array<{
-      title: string;
-      canApply: () => boolean;
-      apply: () => void;
-    }>,
-    isNarrow: boolean,
-    width: number,
-    height: number,
-    upgradeObjects: Phaser.GameObjects.GameObject[]
-  ): void {
-    const cardW = isNarrow ? Math.min(480, width - 80) : 220;
-    const cardH = 70;
-    const cardGap = isNarrow ? 16 : 20;
-    const startY = height / 2 - 80;
-
-    upgrades.forEach((upgrade, i) => {
-      const cardY = isNarrow
-        ? startY + i * (cardH + cardGap)
-        : startY;
-      const cardX = isNarrow
-        ? width / 2
-        : width / 2 - 330 + i * (cardW + cardGap);
-
-      const canApply = upgrade.canApply();
-      const card = this.add
-        .rectangle(cardX, cardY, cardW, cardH, canApply ? 0x2a2a2a : 0x1a1a1a, 1)
-        .setOrigin(0.5)
-        .setScrollFactor(0)
-        .setDepth(30001)
-        .setInteractive({ useHandCursor: canApply })
-        .setStrokeStyle(2, canApply ? 0xffffff : 0x666666, 0.2);
-
-      const cardText = this.add
-        .text(cardX, cardY, upgrade.title, {
-          fontSize: isNarrow ? "18px" : "20px",
-          color: canApply ? "#ffffff" : "#888888",
-          fontStyle: "bold",
-        })
-        .setOrigin(0.5)
-        .setScrollFactor(0)
-        .setDepth(30002);
-
-      if (canApply) {
-        card.on("pointerover", () => {
-          card.setFillStyle(0x3a3a3a, 1);
-          card.setScale(1.05);
-        });
-        card.on("pointerout", () => {
-          card.setFillStyle(0x2a2a2a, 1);
-          card.setScale(1);
-        });
-        card.on(
-          "pointerdown",
-          (
-            _pointer: Phaser.Input.Pointer,
-            _x: number,
-            _y: number,
-            event: any
-          ) => {
-            if (event?.stopPropagation) {
-              event.stopPropagation();
-            }
-            upgrade.apply();
-          }
-        );
-      }
-
-      upgradeObjects.push(card, cardText);
-    });
-  }
-
-  private refreshUpgradeButtons(
-    upgradeObjects: Phaser.GameObjects.GameObject[],
-    upgrades: Array<{
-      title: string;
-      canApply: () => boolean;
-      apply: () => void;
-    }>,
-    isNarrow: boolean,
-    width: number,
-    height: number,
-    pointsText: Phaser.GameObjects.Text
-  ): void {
-    // Удаляем старые кнопки (кроме bg, title, pointsText, continueBtn, continueText)
-    const toKeep = 5; // bg, title, pointsText, continueBtn, continueText
-    while (upgradeObjects.length > toKeep) {
-      const obj = upgradeObjects.pop();
-      if (obj) obj.destroy();
-    }
-
-    // Создаём новые кнопки
-    this.createUpgradeButtons(upgrades, isNarrow, width, height, upgradeObjects);
-
-    // Обновляем контейнер
-    if (this.stageClearOverlay) {
-      this.stageClearOverlay.destroy(true);
-    }
-    this.stageClearOverlay = this.add.container(0, 0, upgradeObjects);
-    this.stageClearOverlay.setDepth(30000);
-    this.stageClearOverlay.setScrollFactor(0);
-    
-    // Обновляем pointsText (он уже в upgradeObjects)
-    pointsText.setText(`POINTS: ${this.upgradePoints}`);
   }
 
   private getStageClearPerks(): LevelUpOption[] {
@@ -1931,10 +2106,17 @@ export class GameScene extends Phaser.Scene {
     const tankHP = this.getStageTankHP(this.currentStage);
     const speedMult = this.getStageSpeedMultiplier(this.currentStage);
     const tankWeight = Math.round(
-      settings.weights.tank * this.getStageTankWeightMultiplier(this.currentStage)
+      settings.weights.tank *
+        this.getStageTankWeightMultiplier(this.currentStage)
     );
     console.log(
-      `[STAGE] START stage=${this.currentStage} (spawnDelay=${spawnDelay.toFixed(0)}ms, weights=runner:${settings.weights.runner}/tank:${tankWeight}, hpRunner=${runnerHP}, hpTank=${tankHP}, speedMul=${speedMult.toFixed(2)})`
+      `[STAGE] START stage=${
+        this.currentStage
+      } (spawnDelay=${spawnDelay.toFixed(0)}ms, weights=runner:${
+        settings.weights.runner
+      }/tank:${tankWeight}, hpRunner=${runnerHP}, hpTank=${tankHP}, speedMul=${speedMult.toFixed(
+        2
+      )})`
     );
   }
 
@@ -1986,7 +2168,9 @@ export class GameScene extends Phaser.Scene {
     this.applyBurstSpeedToEnemies(true);
 
     console.log(
-      `[BURST] START t=${this.stageElapsedSec.toFixed(1)}s duration=${durationSec.toFixed(1)}s`
+      `[BURST] START t=${this.stageElapsedSec.toFixed(
+        1
+      )}s duration=${durationSec.toFixed(1)}s`
     );
   }
 

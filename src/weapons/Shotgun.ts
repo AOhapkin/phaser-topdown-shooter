@@ -96,12 +96,13 @@ export class Shotgun implements Weapon {
     aimAngle: number;
     bullets: Phaser.Physics.Arcade.Group;
     onBulletSpawned?: (bullet: import("../entities/Bullet").Bullet) => void;
+    bypassAmmo?: boolean; // DOUBLE buff: infinite ammo
   }): void {
-    const { scene, time, playerX, playerY, aimAngle, bullets, onBulletSpawned } = args;
+    const { scene, time, playerX, playerY, aimAngle, bullets, onBulletSpawned, bypassAmmo } = args;
 
     this.updateReload(time);
 
-    if (this._isReloading) {
+    if (this._isReloading && !bypassAmmo) {
       return;
     }
 
@@ -109,7 +110,7 @@ export class Shotgun implements Weapon {
       return;
     }
 
-    if (this.ammo <= 0) {
+    if (this.ammo <= 0 && !bypassAmmo) {
       this.startReload(time);
       return;
     }
@@ -131,10 +132,13 @@ export class Shotgun implements Weapon {
     }
 
     this.lastShotTime = time;
-    this.ammo -= 1;
-
-    if (this.ammo <= 0) {
-      this.startReload(time);
+    
+    // DOUBLE buff: не тратим патроны и не запускаем перезарядку
+    if (!bypassAmmo) {
+      this.ammo -= 1;
+      if (this.ammo <= 0) {
+        this.startReload(time);
+      }
     }
   }
 }
