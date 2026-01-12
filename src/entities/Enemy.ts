@@ -53,14 +53,56 @@ const MOVEMENT_CONFIGS: Record<EnemyType, Omit<EnemyMovementConfig, "orbitSign">
 
 export class Enemy extends Phaser.Physics.Arcade.Sprite {
   private target: Player;
-  private speed = 80;
+  private speed!: number; // Инициализируется в конструкторе
+  private baseSpeed = 80;
 
-  private enemyType: EnemyType;
-  private maxHealth = 1;
-  private health = 1;
+  public readonly type: EnemyType;
+  private maxHealth!: number; // Инициализируется в конструкторе
+  private health!: number; // Инициализируется в конструкторе
+  private baseMaxHealth = 1;
+  private phase = 1;
 
   public getType(): EnemyType {
-    return this.enemyType;
+    return this.type;
+  }
+
+  private computeMaxHealth(): number {
+    if (this.type === "runner") {
+      if (this.phase >= 5) return 2;
+      return 1;
+    }
+
+    if (this.type === "tank") {
+      if (this.phase >= 7) return 5;
+      if (this.phase >= 4) return 4;
+      return 3; // Минимум 3 HP для tank
+    }
+
+    // fast и heavy пока не скейлятся по фазе
+    if (this.type === "fast") {
+      return 1;
+    }
+
+    if (this.type === "heavy") {
+      return 5;
+    }
+
+    return this.baseMaxHealth;
+  }
+
+  private computeSpeed(): number {
+    if (this.type === "runner") {
+      if (this.phase >= 6) return Math.round(this.baseSpeed * 1.08);
+      return this.baseSpeed;
+    }
+
+    // tank — НЕ ускоряем
+    if (this.type === "tank") {
+      return this.baseSpeed;
+    }
+
+    // fast и heavy пока не скейлятся по фазе
+    return this.baseSpeed;
   }
 
   // Система движения
@@ -80,20 +122,24 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
   // Health bar
   private healthBar: HealthBar;
 
+  // Death animation
+  private isDying = false;
+
   constructor(
     scene: Phaser.Scene,
     x: number,
     y: number,
     target: Player,
     type: EnemyType = "runner",
-    level: number = 1,
+    phase: number = 1,
     enemiesGroup: Phaser.Physics.Arcade.Group
   ) {
     super(scene, x, y, "enemy");
 
     this.target = target;
-    this.enemyType = type;
+    this.type = type;
     this.enemiesGroup = enemiesGroup;
+    this.phase = phase;
 
     scene.add.existing(this);
     scene.physics.add.existing(this);
@@ -104,27 +150,27 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
     body.setCollideWorldBounds(true);
 
     // Базовые характеристики по типу
-    if (this.enemyType === "runner") {
-      this.maxHealth = 1;
-      this.speed = 110;
+    if (this.type === "runner") {
+      this.baseMaxHealth = 1;
+      this.baseSpeed = 110;
       this.setScale(1);
       this.clearTint();
       this.baseTint = undefined;
-    } else if (this.enemyType === "tank") {
-      this.maxHealth = 3;
-      this.speed = 60;
+    } else if (this.type === "tank") {
+      this.baseMaxHealth = 3;
+      this.baseSpeed = 60;
       this.setScale(1.3);
       this.setTint(0x4fc3f7);
       this.baseTint = 0x4fc3f7;
-    } else if (this.enemyType === "fast") {
-      this.maxHealth = 1;
-      this.speed = 150;
+    } else if (this.type === "fast") {
+      this.baseMaxHealth = 1;
+      this.baseSpeed = 150;
       this.setScale(0.9);
       this.setTint(0xffeb3b); // Жёлтый
       this.baseTint = 0xffeb3b;
-    } else if (this.enemyType === "heavy") {
-      this.maxHealth = 5;
-      this.speed = 40;
+    } else if (this.type === "heavy") {
+      this.baseMaxHealth = 5;
+      this.baseSpeed = 40;
       this.setScale(1.5);
       this.setTint(0x9c27b0); // Фиолетовый
       this.baseTint = 0x9c27b0;
@@ -132,31 +178,28 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
 
     this.baseAlpha = 1;
 
-    // Масштабирование по уровню: +5% HP и скорости каждые 3 уровня (начиная с уровня 4)
-    // Уровень 1-3: без бонуса, 4-6: +5%, 7-9: +10%, 10-12: +15% и т.д.
-    if (level >= 4) {
-      const scalingMultiplier = Math.floor((level - 1) / 3) * 0.05; // +5% каждые 3 уровня
-      const levelScaling = 1 + scalingMultiplier;
-      this.maxHealth = Math.floor(this.maxHealth * levelScaling);
-      this.speed = Math.round(this.speed * levelScaling);
-    }
+    // Фазовый скейлинг - ВАЖНО: сначала maxHealth, потом health
+    this.maxHealth = this.computeMaxHealth();
+    this.health = this.maxHealth; // Всегда равен maxHealth при создании
+    this.speed = this.computeSpeed();
 
-    this.health = this.maxHealth;
-
-    // Создаём health bar (скрыт по умолчанию)
+    // Создаём health bar (скрыт по умолчанию) - только после установки health
     this.healthBar = new HealthBar(scene, x, y - 20, 28, 4);
     this.healthBar.setHealth(this.health, this.maxHealth);
     this.healthBar.setVisible(false);
 
+    // Временный лог для отладки (только если debugLogs включен)
+    // Убрано для уменьшения шума в консоли
+
     // Инициализация конфигурации движения
-    const baseConfig = MOVEMENT_CONFIGS[this.enemyType];
+    const baseConfig = MOVEMENT_CONFIGS[this.type];
     this.moveCfg = {
       ...baseConfig,
       orbitSign: Phaser.Math.Between(0, 1) === 0 ? -1 : 1, // Случайно 1 или -1
     };
 
     // Настройка hitbox по типу врага
-    if (this.enemyType === "runner" || this.enemyType === "fast") {
+    if (this.type === "runner" || this.type === "fast") {
       // Маленькие враги
       this.setCircle(10);
     } else {
@@ -167,6 +210,11 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
 
   preUpdate(time: number, delta: number): void {
     super.preUpdate(time, delta);
+
+    // Если умирает - не обрабатываем движение
+    if (this.isDying) {
+      return;
+    }
 
     if (!this.scene || !this.active || !this.target || !this.target.active) {
       return;
@@ -185,7 +233,7 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
 
     // Обновляем позицию health bar
     if (this.healthBar && this.healthBar.active) {
-      const offset = this.enemyType === "tank" || this.enemyType === "heavy" ? 30 : 22;
+      const offset = this.type === "tank" || this.type === "heavy" ? 30 : 22;
       this.healthBar.setPositionAbove(this.x, this.y, offset);
     }
 
@@ -283,6 +331,11 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
   }
 
   public applyHitFeedback(fromX: number, fromY: number, time: number): void {
+    // Если умирает - не обрабатываем попадание
+    if (this.isDying) {
+      return;
+    }
+
     // 1) Flash
     this.hitFlashUntil = time + 90;
     this.setTint(0xffffff);
@@ -296,19 +349,25 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
     const ny = dy / dist;
 
     // Разная сила knockback для разных типов
-    const strength =
-      this.enemyType === "tank" || this.enemyType === "heavy" ? 140 : 220;
+    const strength = this.type === "tank" || this.type === "heavy" ? 140 : 220;
     this.knockbackVx = nx * strength;
     this.knockbackVy = ny * strength;
     this.knockbackUntil = time + 80; // 80ms
   }
 
   public takeDamage(amount: number): boolean {
+    if (this.isDying) {
+      return false;
+    }
+
     if (!this.active) {
       return false;
     }
 
-    this.health -= amount;
+    this.health = Math.max(0, this.health - amount);
+
+    // Временный лог для отладки (только если debugLogs включен)
+    // Убрано для уменьшения шума в консоли
 
     // Обновляем health bar и показываем его, если враг получил урон
     if (this.healthBar && this.healthBar.active) {
@@ -318,12 +377,117 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
       }
     }
 
-    if (this.health <= 0) {
-      this.destroy();
-      return true;
+    // Возвращаем true только если health <= 0 (смерть обрабатывается снаружи)
+    return this.health <= 0;
+  }
+
+  private spawnDeathDebris(fromX: number, fromY: number): void {
+    const scene = this.scene;
+
+    const isTank = this.type === "tank" || this.type === "heavy";
+    const count = isTank
+      ? Phaser.Math.Between(7, 10)
+      : Phaser.Math.Between(4, 6);
+    const baseColor = isTank ? 0xffdddd : 0xdddddd;
+
+    // направление наружу от удара
+    const dx = this.x - fromX;
+    const dy = this.y - fromY;
+    const dist = Math.max(0.0001, Math.hypot(dx, dy));
+    const nx = dx / dist;
+    const ny = dy / dist;
+
+    for (let i = 0; i < count; i++) {
+      const size = isTank
+        ? Phaser.Math.Between(4, 7)
+        : Phaser.Math.Between(3, 5);
+
+      const px = this.x + Phaser.Math.Between(-6, 6);
+      const py = this.y + Phaser.Math.Between(-6, 6);
+
+      const rect = scene.add.rectangle(px, py, size, size, baseColor, 1);
+      rect.setDepth(1500);
+
+      scene.physics.add.existing(rect);
+      const body = rect.body as Phaser.Physics.Arcade.Body;
+      body.setAllowGravity(false);
+
+      // скорость: наружу + немного рандома
+      const spread = 0.9;
+      const rx = nx + Phaser.Math.FloatBetween(-spread, spread);
+      const ry = ny + Phaser.Math.FloatBetween(-spread, spread);
+      const rlen = Math.max(0.0001, Math.hypot(rx, ry));
+      const vxDir = rx / rlen;
+      const vyDir = ry / rlen;
+
+      const speed = isTank
+        ? Phaser.Math.Between(140, 240)
+        : Phaser.Math.Between(180, 320);
+      body.setVelocity(vxDir * speed, vyDir * speed);
+
+      body.setDrag(700, 700);
+      body.setAngularVelocity(Phaser.Math.Between(-360, 360));
+
+      const life = isTank
+        ? Phaser.Math.Between(320, 460)
+        : Phaser.Math.Between(260, 380);
+
+      scene.tweens.add({
+        targets: rect,
+        alpha: 0,
+        scale: 0.6,
+        duration: life,
+        ease: "Quad.easeOut",
+        onComplete: () => rect.destroy(),
+      });
+    }
+  }
+
+  public die(fromX: number, fromY: number): void {
+    if (this.isDying) {
+      return;
+    }
+    this.isDying = true;
+
+    // Спавним осколки сразу
+    this.spawnDeathDebris(fromX, fromY);
+
+    // Отключаем физику и столкновения
+    const body = this.body as Phaser.Physics.Arcade.Body;
+    body.enable = false;
+    body.setVelocity(0, 0);
+
+    // Убираем хитбоксы/интеракции
+    this.setActive(false);
+
+    // Убираем health bar (если есть)
+    if (this.healthBar && this.healthBar.active) {
+      this.healthBar.destroy();
     }
 
-    return false;
+    // Death pop параметры по типу
+    const popScale = this.type === "tank" || this.type === "heavy" ? 1.18 : 1.12;
+    const duration = this.type === "tank" || this.type === "heavy" ? 180 : 120;
+
+    // Вектор "наружу" от последнего удара (лёгкий визуальный сдвиг)
+    const dx = this.x - fromX;
+    const dy = this.y - fromY;
+    const dist = Math.max(0.0001, Math.hypot(dx, dy));
+    const nx = dx / dist;
+    const ny = dy / dist;
+
+    this.scene.tweens.add({
+      targets: this,
+      scale: popScale,
+      alpha: 0,
+      x: this.x + nx * 8,
+      y: this.y + ny * 8,
+      duration,
+      ease: "Quad.easeOut",
+      onComplete: () => {
+        this.destroy();
+      },
+    });
   }
 
   destroy(fromScene?: boolean): void {

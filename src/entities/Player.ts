@@ -12,11 +12,13 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
   private wasd: WASDKeys;
 
   private baseSpeed = 220;
-  private speedMultiplier = 1;
+  private speedMultiplier = 1; // временный буст (speed loot)
+  private moveSpeedLevel = 0; // 0..5, постоянный апгрейд
 
   private baseMaxHealth = 3;
   private maxHealth = this.baseMaxHealth;
   private health = this.maxHealth;
+  private maxHpUpgrades = 0; // 0..5
 
   private damage = 1;
 
@@ -31,6 +33,8 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
   private knockbackVx = 0;
   private knockbackVy = 0;
   private invulnTween?: Phaser.Tweens.Tween;
+  private baseIFramesMs = 800;
+  private iFramesBonusLevel = 0; // 0..4
 
   constructor(scene: Phaser.Scene, x: number, y: number) {
     super(scene, x, y, "player");
@@ -88,6 +92,48 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
     this.knockbackVx = nx * strength;
     this.knockbackVy = ny * strength;
     this.knockbackUntil = this.scene.time.now + durationMs;
+  }
+
+  public getIFramesMs(): number {
+    return this.baseIFramesMs + this.iFramesBonusLevel * 100;
+  }
+
+  public canIncreaseIFrames(): boolean {
+    return this.iFramesBonusLevel < 4;
+  }
+
+  public increaseIFrames(): boolean {
+    if (this.iFramesBonusLevel >= 4) {
+      return false;
+    }
+    this.iFramesBonusLevel++;
+    return true;
+  }
+
+  public canIncreaseMoveSpeed(): boolean {
+    return this.moveSpeedLevel < 5;
+  }
+
+  public increaseMoveSpeed(): boolean {
+    if (this.moveSpeedLevel >= 5) {
+      return false;
+    }
+    this.moveSpeedLevel++;
+    return true;
+  }
+
+  public canIncreaseMaxHp(): boolean {
+    return this.maxHpUpgrades < 5;
+  }
+
+  public increaseMaxHp(): boolean {
+    if (this.maxHpUpgrades >= 5) {
+      return false;
+    }
+    this.maxHpUpgrades++;
+    this.maxHealth++;
+    this.health = this.maxHealth; // полное восстановление при апгрейде
+    return true;
   }
 
   public startInvulnerability(durationMs: number): void {
@@ -164,27 +210,9 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
     this.armorEndTime = this.scene.time.now + durationMs;
   }
 
-  onLevelUp(level: number): void {
-    let changed = false;
-
-    this.maxHealth += 1;
-    this.health = this.maxHealth;
-    changed = true;
-
-    if (level % 2 === 0) {
-      this.baseSpeed = Math.round(this.baseSpeed * 1.05);
-      changed = true;
-    }
-
-    if (level % 4 === 0) {
-      this.damage += 1;
-      changed = true;
-    }
-
-    if (changed) {
-      // Можно добавить визуальный эффект или лог
-      // console.log(`Level up ${level}: hp=${this.maxHealth}, speed=${this.baseSpeed}, dmg=${this.damage}`);
-    }
+  onLevelUp(_level: number): void {
+    // Автопрокачка убрана - теперь всё через карточки level-up
+    // Оставляем метод для совместимости, но ничего не делаем
   }
 
   update() {
@@ -234,7 +262,11 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
 
     if (vx !== 0 || vy !== 0) {
       const len = Math.hypot(vx, vy) || 1;
-      const speed = this.baseSpeed * this.speedMultiplier;
+      // Базовая скорость * постоянный апгрейд * временный буст
+      const speed =
+        this.baseSpeed *
+        (1 + this.moveSpeedLevel * 0.05) *
+        this.speedMultiplier;
       vx = (vx / len) * speed;
       vy = (vy / len) * speed;
     }

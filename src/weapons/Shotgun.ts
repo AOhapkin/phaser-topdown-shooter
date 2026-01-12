@@ -2,8 +2,8 @@ import Phaser from "phaser";
 import { Weapon, WeaponStats } from "./types";
 import { Bullet } from "../entities/Bullet";
 
-export class BasicGun implements Weapon {
-  public readonly key: "pistol" = "pistol";
+export class Shotgun implements Weapon {
+  public readonly key: "shotgun" = "shotgun";
 
   private fireRate: number;
   private lastShotTime = 0;
@@ -15,21 +15,20 @@ export class BasicGun implements Weapon {
   private _isReloading = false;
   private reloadStartTime = 0;
 
-  constructor(options?: {
-    fireRate?: number;
-    magazineSize?: number;
-    reloadTime?: number;
-  }) {
-    this.fireRate = options?.fireRate ?? 600;
-    this.magazineSize = options?.magazineSize ?? 6;
-    this.reloadTime = options?.reloadTime ?? 1500;
+  // Spread для конуса выстрела (в радианах)
+  private readonly spreadAngles = [-0.3, -0.15, 0, 0.15, 0.3]; // 5 пуль
+
+  constructor() {
+    this.fireRate = 800;
+    this.magazineSize = 2;
+    this.reloadTime = 1400;
 
     this.ammo = this.magazineSize;
   }
 
   getStats(): WeaponStats {
     return {
-      name: "PISTOL",
+      name: "SHOTGUN",
       magazineSize: this.magazineSize,
       reloadTimeMs: this.reloadTime,
       fireRateMs: this.fireRate,
@@ -54,7 +53,7 @@ export class BasicGun implements Weapon {
   }
 
   getReloadProgressWithTime(currentTime: number): number {
-    if (!this.isReloading) {
+    if (!this._isReloading) {
       return 0;
     }
     const elapsed = currentTime - this.reloadStartTime;
@@ -66,50 +65,6 @@ export class BasicGun implements Weapon {
     this._isReloading = false;
     this.reloadStartTime = 0;
     this.lastShotTime = 0;
-  }
-
-  // Методы для улучшений с проверкой капов
-  decreaseFireRate(amount: number): boolean {
-    const newRate = this.fireRate - amount;
-    if (newRate < 420) {
-      return false;
-    }
-    this.fireRate = newRate;
-    return true;
-  }
-
-  canDecreaseFireRate(amount: number): boolean {
-    return this.fireRate - amount >= 420;
-  }
-
-  decreaseReloadTime(amount: number): boolean {
-    const newTime = this.reloadTime - amount;
-    if (newTime < 900) {
-      return false;
-    }
-    this.reloadTime = newTime;
-    return true;
-  }
-
-  canDecreaseReloadTime(amount: number): boolean {
-    return this.reloadTime - amount >= 900;
-  }
-
-  increaseMagazine(amount: number): boolean {
-    const newSize = this.magazineSize + amount;
-    if (newSize > 10) {
-      return false;
-    }
-    this.magazineSize = newSize;
-    // Если перезарядка не идет, обновляем текущий магазин
-    if (!this._isReloading) {
-      this.ammo = Math.min(this.ammo + amount, this.magazineSize);
-    }
-    return true;
-  }
-
-  canIncreaseMagazine(amount: number): boolean {
-    return this.magazineSize + amount <= 10;
   }
 
   private startReload(time: number) {
@@ -159,17 +114,21 @@ export class BasicGun implements Weapon {
       return;
     }
 
-    const bullet = new Bullet(scene, playerX, playerY);
-    bullets.add(bullet);
-    onBulletSpawned?.();
+    // Создаём 5 пуль в конусе
+    for (const spreadOffset of this.spreadAngles) {
+      const bulletAngle = aimAngle + spreadOffset;
+      const bullet = new Bullet(scene, playerX, playerY);
+      bullets.add(bullet);
+      onBulletSpawned?.();
 
-    const speed = bullet.speed;
-    const vx = Math.cos(aimAngle) * speed;
-    const vy = Math.sin(aimAngle) * speed;
+      const speed = bullet.speed;
+      const vx = Math.cos(bulletAngle) * speed;
+      const vy = Math.sin(bulletAngle) * speed;
 
-    const body = bullet.body as Phaser.Physics.Arcade.Body;
-    body.setVelocity(vx, vy);
-    body.setAllowGravity(false);
+      const body = bullet.body as Phaser.Physics.Arcade.Body;
+      body.setVelocity(vx, vy);
+      body.setAllowGravity(false);
+    }
 
     this.lastShotTime = time;
     this.ammo -= 1;
@@ -179,3 +138,4 @@ export class BasicGun implements Weapon {
     }
   }
 }
+

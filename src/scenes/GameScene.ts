@@ -3,8 +3,9 @@ import { Player } from "../entities/Player";
 import { Bullet } from "../entities/Bullet";
 import { Enemy, EnemyType } from "../entities/Enemy";
 import { LootPickup, LootType } from "../entities/LootPickup";
-import { Weapon } from "../weapons/Weapon";
+import { Weapon } from "../weapons/types";
 import { BasicGun } from "../weapons/BasicGun";
+import { Shotgun } from "../weapons/Shotgun";
 import { LevelUpOverlay, LevelUpOption } from "../ui/LevelUpOverlay";
 
 import playerSvg from "../assets/player.svg?url";
@@ -13,17 +14,96 @@ import bulletSvg from "../assets/bullet.svg?url";
 import healSvg from "../assets/heal.svg?url";
 import speedSvg from "../assets/speed.svg?url";
 
-type EnemyConfig = {
-  type: EnemyType;
-  minLevel: number;
-  weight: number;
+// EnemyConfig и ENEMY_CONFIGS больше не используются - теперь используем систему фаз
+// type EnemyConfig = {
+//   type: EnemyType;
+//   minLevel: number;
+//   weight: number;
+// };
+//
+// const ENEMY_CONFIGS: EnemyConfig[] = [
+//   { type: "runner", minLevel: 1, weight: 70 },
+//   { type: "tank", minLevel: 3, weight: 30 },
+//   { type: "fast", minLevel: 5, weight: 25 },
+//   { type: "heavy", minLevel: 7, weight: 20 },
+// ];
+
+type PhaseSettings = {
+  phase: number;
+  durationSec: number;
+  maxAliveEnemies: number;
+  spawnDelayMs: number;
+  weights: { runner: number; tank: number };
+  tankCap: number;
 };
 
-const ENEMY_CONFIGS: EnemyConfig[] = [
-  { type: "runner", minLevel: 1, weight: 70 },
-  { type: "tank", minLevel: 3, weight: 30 },
-  { type: "fast", minLevel: 5, weight: 25 },
-  { type: "heavy", minLevel: 7, weight: 20 },
+const PHASE_DURATION_SEC = 45;
+const MIN_SPAWN_DELAY_MS = 560;
+
+type MatchStats = {
+  startedAtMs: number;
+  endedAtMs: number | null;
+
+  score: number;
+  level: number;
+  phase: number;
+
+  shotsFired: number; // реально выпущенные пули
+  shotsHit: number; // попадания по врагам
+  killsTotal: number;
+  killsRunner: number;
+  killsTank: number;
+
+  damageTaken: number;
+  healsPicked: number;
+  speedPicked: number;
+
+  weaponStart: string; // "PISTOL"
+  weaponCurrent: string; // "PISTOL"/"SHOTGUN"
+  weaponSwitches: number;
+};
+
+const PHASES: PhaseSettings[] = [
+  {
+    phase: 1,
+    durationSec: PHASE_DURATION_SEC,
+    maxAliveEnemies: 10,
+    spawnDelayMs: 900,
+    weights: { runner: 100, tank: 0 },
+    tankCap: 0,
+  },
+  {
+    phase: 2,
+    durationSec: PHASE_DURATION_SEC,
+    maxAliveEnemies: 12,
+    spawnDelayMs: 850,
+    weights: { runner: 90, tank: 10 },
+    tankCap: 1,
+  },
+  {
+    phase: 3,
+    durationSec: PHASE_DURATION_SEC,
+    maxAliveEnemies: 14,
+    spawnDelayMs: 800,
+    weights: { runner: 80, tank: 20 },
+    tankCap: 2,
+  },
+  {
+    phase: 4,
+    durationSec: PHASE_DURATION_SEC,
+    maxAliveEnemies: 16,
+    spawnDelayMs: 760,
+    weights: { runner: 70, tank: 30 },
+    tankCap: 3,
+  },
+  {
+    phase: 5,
+    durationSec: PHASE_DURATION_SEC,
+    maxAliveEnemies: 18,
+    spawnDelayMs: 720,
+    weights: { runner: 60, tank: 40 },
+    tankCap: 4,
+  },
 ];
 
 export class GameScene extends Phaser.Scene {
@@ -38,7 +118,6 @@ export class GameScene extends Phaser.Scene {
 
   private level = 1;
   private xp = 0;
-  private xpToNextLevel = 5;
   private xpText!: Phaser.GameObjects.Text;
 
   private ammoText!: Phaser.GameObjects.Text;
@@ -62,6 +141,15 @@ export class GameScene extends Phaser.Scene {
   private restartKey!: Phaser.Input.Keyboard.Key;
   private loot!: Phaser.Physics.Arcade.Group;
   private weapon!: Weapon;
+
+  // Phase system
+  private runStartTime = 0;
+  private currentPhase = 1;
+  private phaseText?: Phaser.GameObjects.Text;
+
+  // Match stats
+  private stats!: MatchStats;
+  private debugLogs = false; // выключить шумные логи
 
   constructor() {
     super("GameScene");
@@ -87,6 +175,10 @@ export class GameScene extends Phaser.Scene {
     this.baseSpawnDelay = 1000;
     this.currentSpawnDelay = this.baseSpawnDelay;
 
+    // Сбрасываем фазы
+    this.runStartTime = 0;
+    this.currentPhase = 1;
+
     // Клавиша рестарта
     this.restartKey = this.input.keyboard!.addKey(
       Phaser.Input.Keyboard.KeyCodes.R
@@ -106,6 +198,14 @@ export class GameScene extends Phaser.Scene {
       }
     });
 
+    // Hotkey F2 для печати статистики
+    const statsKey = this.input.keyboard?.addKey(
+      Phaser.Input.Keyboard.KeyCodes.F2
+    );
+    statsKey?.on("down", () => {
+      this.printMatchSummary("MANUAL");
+    });
+
     // Игрок
     this.player = new Player(this, width / 2, height / 2);
 
@@ -120,6 +220,10 @@ export class GameScene extends Phaser.Scene {
 
     // Оружие: стартовый пистолет
     this.weapon = new BasicGun({});
+    this.weapon.refillAndReset();
+
+    // Инициализируем статистику после создания оружия
+    this.resetMatchStats();
 
     // Группа врагов
     this.enemies = this.physics.add.group({
@@ -177,13 +281,20 @@ export class GameScene extends Phaser.Scene {
     // XP / уровень
     this.level = 1;
     this.xp = 0;
-    this.xpToNextLevel = 5;
 
     this.xpText = this.add.text(16, 40, "", {
       fontSize: "16px",
       color: "#ffffff",
     });
     this.updateXPText();
+
+    // Временный лог порогов для проверки (только если debugLogs включен)
+    if (this.debugLogs) {
+      console.log("XP Thresholds for first 10 levels:");
+      for (let lvl = 1; lvl <= 10; lvl++) {
+        console.log(`lvl ${lvl} need ${this.getXPToNextLevel(lvl)}`);
+      }
+    }
 
     // UI: патроны и прогресс-бар перезарядки (слева внизу)
     const ammoY = height - 60;
@@ -290,6 +401,23 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
+    // Обновление текущей фазы
+    const elapsed = this.getElapsedSec();
+    const phase = this.getPhaseNumber(elapsed);
+    if (phase !== this.currentPhase) {
+      this.currentPhase = phase;
+      // Обновляем статистику
+      this.stats.phase = this.currentPhase;
+      this.updateSpawnTimerByPhase();
+      // Опционально: обновить debug текст
+      if (this.phaseText) {
+        const settings = this.getPhaseSettings(this.currentPhase);
+        this.phaseText.setText(
+          `PHASE: ${this.currentPhase} | Max: ${settings.maxAliveEnemies} | Delay: ${settings.spawnDelayMs}ms`
+        );
+      }
+    }
+
     if (this.player) {
       this.player.update();
     }
@@ -315,12 +443,28 @@ export class GameScene extends Phaser.Scene {
     }
 
     const pointer = this.input.activePointer;
+    const aimAngle = Phaser.Math.Angle.Between(
+      this.player.x,
+      this.player.y,
+      pointer.worldX,
+      pointer.worldY
+    );
+
+    // Проверяем, что кнопка мыши нажата
+    if (!pointer.isDown) {
+      return;
+    }
+
     this.weapon.tryFire({
       scene: this,
-      player: this.player,
-      bullets: this.bullets,
-      pointer,
       time,
+      playerX: this.player.x,
+      playerY: this.player.y,
+      aimAngle,
+      bullets: this.bullets,
+      onBulletSpawned: () => {
+        this.stats.shotsFired++;
+      },
     });
   }
 
@@ -330,9 +474,73 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    const { width, height } = this.scale;
+    const settings = this.getPhaseSettings(this.currentPhase);
 
-    // Случайная сторона: 0 = сверху, 1 = снизу, 2 = слева, 3 = справа
+    // 1) Проверка maxAliveEnemies
+    const alive = this.enemies.countActive(true);
+    if (alive >= settings.maxAliveEnemies) {
+      return;
+    }
+
+    // 2) Проверка tankCap
+    const tanksAlive = this.getAliveTanksCount();
+    if (settings.tankCap === 0) {
+      // Фаза 1: только runner
+      const { width, height } = this.scale;
+      const side = Phaser.Math.Between(0, 3);
+      let x = 0;
+      let y = 0;
+
+      switch (side) {
+        case 0: // top
+          x = Phaser.Math.Between(0, width);
+          y = -20;
+          break;
+        case 1: // bottom
+          x = Phaser.Math.Between(0, width);
+          y = height + 20;
+          break;
+        case 2: // left
+          x = -20;
+          y = Phaser.Math.Between(0, height);
+          break;
+        case 3: // right
+          x = width + 20;
+          y = Phaser.Math.Between(0, height);
+          break;
+      }
+
+      const enemy = new Enemy(
+        this,
+        x,
+        y,
+        this.player,
+        "runner",
+        this.currentPhase,
+        this.enemies
+      );
+      this.enemies.add(enemy);
+      return;
+    }
+
+    // 3) Выбор типа по весам
+    const totalWeight = settings.weights.runner + settings.weights.tank;
+    let roll = Phaser.Math.Between(1, totalWeight);
+    let chosenType: EnemyType = "runner";
+
+    if (roll <= settings.weights.runner) {
+      chosenType = "runner";
+    } else {
+      chosenType = "tank";
+    }
+
+    // 4) Применить tankCap
+    if (chosenType === "tank" && tanksAlive >= settings.tankCap) {
+      chosenType = "runner";
+    }
+
+    // 5) Спавн
+    const { width, height } = this.scale;
     const side = Phaser.Math.Between(0, 3);
     let x = 0;
     let y = 0;
@@ -356,61 +564,13 @@ export class GameScene extends Phaser.Scene {
         break;
     }
 
-    const availableConfigs = ENEMY_CONFIGS.filter(
-      (cfg) => cfg.minLevel <= this.level
-    );
-    if (availableConfigs.length === 0) {
-      return;
-    }
-
-    // Динамические веса: runner реже на высоких уровнях, tank/heavy чаще
-    const configsWithWeights = availableConfigs.map((cfg) => {
-      let weight = cfg.weight;
-
-      // Runner становится реже на высоких уровнях
-      if (cfg.type === "runner") {
-        weight = Math.max(20, 70 - (this.level - 1) * 3);
-      }
-
-      // Tank становится чаще
-      if (cfg.type === "tank") {
-        weight = Math.min(50, 30 + (this.level - 3) * 3);
-      }
-
-      // Heavy становится чаще на высоких уровнях
-      if (cfg.type === "heavy") {
-        weight = Math.min(40, 20 + (this.level - 7) * 2);
-      }
-
-      return { ...cfg, weight };
-    });
-
-    const totalWeight = configsWithWeights.reduce(
-      (sum, cfg) => sum + cfg.weight,
-      0
-    );
-    if (totalWeight <= 0) {
-      return;
-    }
-
-    let roll = Phaser.Math.Between(1, totalWeight);
-    let chosen = configsWithWeights[0];
-
-    for (const cfg of configsWithWeights) {
-      if (roll <= cfg.weight) {
-        chosen = cfg;
-        break;
-      }
-      roll -= cfg.weight;
-    }
-
     const enemy = new Enemy(
       this,
       x,
       y,
       this.player,
-      chosen.type,
-      this.level,
+      chosenType,
+      this.currentPhase,
       this.enemies
     );
     this.enemies.add(enemy);
@@ -428,18 +588,42 @@ export class GameScene extends Phaser.Scene {
     const bullet = bulletObj as Bullet;
     const enemy = enemyObj as Enemy;
 
+    // Защита от двойного overlap: отключаем body пули перед destroy
+    const bulletBody = bullet.body as Phaser.Physics.Arcade.Body | undefined;
+    if (bulletBody) {
+      bulletBody.enable = false;
+    }
+
     // Визуальный фидбек до уничтожения пули
     enemy.applyHitFeedback(bullet.x, bullet.y, this.time.now);
 
-    // Наносим урон
-    const gun = this.weapon as BasicGun;
-    const totalDamage = this.player.getDamage() + gun.getDamageBonus();
+    // Статистика: попадание
+    this.stats.shotsHit++;
+
+    // Наносим урон (урон игрока, без бонуса оружия)
+    const totalDamage = this.player.getDamage();
     const killed = enemy.takeDamage(totalDamage);
 
     // Пуля всегда исчезает при попадании
     bullet.destroy();
 
     if (killed) {
+      // Микро hit-stop
+      this.physics.pause();
+      this.time.delayedCall(14, () => {
+        this.physics.resume();
+      });
+
+      enemy.die(bullet.x, bullet.y);
+
+      // Статистика: убийство
+      this.stats.killsTotal++;
+      if (enemy.type === "runner") {
+        this.stats.killsRunner++;
+      } else if (enemy.type === "tank") {
+        this.stats.killsTank++;
+      }
+
       this.score += 1;
       this.scoreText.setText(`Score: ${this.score}`);
 
@@ -471,13 +655,14 @@ export class GameScene extends Phaser.Scene {
 
     // 1) Наносим урон
     player.takeDamage(1);
+    this.stats.damageTaken += 1;
     this.updateHealthText();
 
     // 2) Запускаем i-frames
-    player.startInvulnerability(800); // 800ms — хороший старт
+    player.startInvulnerability(player.getIFramesMs());
 
     // 3) Отбрасываем игрока
-    const strength = enemy.getType() === "tank" ? 320 : 260; // Чуть сильнее от танка
+    const strength = enemy.type === "tank" ? 320 : 260; // Чуть сильнее от танка
     player.applyKnockback(enemy.x, enemy.y, strength, 140); // 140ms knockback
 
     // Врага НЕ уничтожаем!
@@ -493,6 +678,58 @@ export class GameScene extends Phaser.Scene {
     this.healthText.setText(`HP: ${hp}/${maxHp}`);
   }
 
+  private getElapsedSec(): number {
+    if (this.runStartTime === 0) {
+      return 0;
+    }
+    return Math.max(0, (this.time.now - this.runStartTime) / 1000);
+  }
+
+  private getPhaseNumber(elapsedSec: number): number {
+    return Math.floor(elapsedSec / PHASE_DURATION_SEC) + 1;
+  }
+
+  private getPhaseSettings(phase: number): PhaseSettings {
+    const preset = PHASES.find((p) => p.phase === phase);
+    if (preset) {
+      return preset;
+    }
+
+    // phase 6+
+    const extra = phase - 6;
+    const aliveBoost = Math.floor(extra / 2) * 2; // +2 каждые 2 фазы
+    const maxAliveEnemies = 20 + aliveBoost; // фаза 6 стартует с 20
+    const spawnDelayMs = Math.max(
+      MIN_SPAWN_DELAY_MS,
+      680 - Math.floor(extra / 1) * 35
+    );
+    return {
+      phase,
+      durationSec: PHASE_DURATION_SEC,
+      maxAliveEnemies,
+      spawnDelayMs,
+      weights: { runner: 55, tank: 45 },
+      tankCap: 5,
+    };
+  }
+
+  private getAliveTanksCount(): number {
+    let count = 0;
+    this.enemies.getChildren().forEach((obj) => {
+      const enemy = obj as Enemy;
+      if (enemy.active && enemy.type === "tank") {
+        count++;
+      }
+    });
+    return count;
+  }
+
+  private getXPToNextLevel(level: number): number {
+    // Линейная формула: 4 + level * 2
+    // lvl1->2: 6, lvl2->3: 8, lvl3->4: 10, и т.д.
+    return 4 + level * 2;
+  }
+
   private addXP(amount: number) {
     this.xp += amount;
     this.checkLevelUp();
@@ -500,11 +737,14 @@ export class GameScene extends Phaser.Scene {
   }
 
   private checkLevelUp() {
-    while (this.xp >= this.xpToNextLevel) {
-      this.xp -= this.xpToNextLevel;
+    // Корректная обработка перепрыгивания порога
+    while (this.xp >= this.getXPToNextLevel(this.level)) {
+      const needed = this.getXPToNextLevel(this.level);
+      this.xp -= needed;
       this.level += 1;
 
-      this.xpToNextLevel = Math.floor(this.xpToNextLevel * 1.5);
+      // Обновляем статистику
+      this.stats.level = this.level;
 
       this.onLevelUp();
       this.showLevelUpOverlay();
@@ -512,10 +752,9 @@ export class GameScene extends Phaser.Scene {
   }
 
   private onLevelUp() {
-    // Усложняем игру: немного уменьшаем задержку спавна врагов
-    // но не опускаемся ниже 400 мс
-    this.currentSpawnDelay = Math.max(400, this.currentSpawnDelay - 50);
-    this.updateSpawnTimer();
+    // Усложнение через фазы теперь управляется системой фаз
+    // Оставляем эту логику для совместимости, но приоритет у фаз
+    // Можно убрать или оставить как fallback
 
     // Прокачка характеристик игрока
     this.player.onLevelUp(this.level);
@@ -547,76 +786,195 @@ export class GameScene extends Phaser.Scene {
   }
 
   private getAvailableLevelUpOptions(): LevelUpOption[] {
-    const gun = this.weapon as BasicGun;
     const all: LevelUpOption[] = [];
 
-    if (gun.canIncreaseDamage()) {
+    // 1) Handling апгрейды пистолета (только если текущее оружие - пистолет)
+    if (this.weapon.key === "pistol") {
+      const gun = this.weapon as BasicGun;
+
+      if (gun.canDecreaseFireRate(40)) {
+        all.push({
+          title: "FIRE RATE -40ms",
+          description: "",
+          apply: () => {
+            gun.decreaseFireRate(40);
+          },
+        });
+      }
+
+      if (gun.canDecreaseReloadTime(150)) {
+        all.push({
+          title: "RELOAD -150ms",
+          description: "",
+          apply: () => {
+            gun.decreaseReloadTime(150);
+          },
+        });
+      }
+
+      if (gun.canIncreaseMagazine(1)) {
+        all.push({
+          title: "MAGAZINE +1",
+          description: "",
+          apply: () => {
+            gun.increaseMagazine(1);
+          },
+        });
+      }
+    }
+
+    // 2) Апгрейды игрока (movement-skill)
+    if (this.player.canIncreaseMoveSpeed()) {
       all.push({
-        title: "DAMAGE +1",
+        title: "MOVE SPEED +5%",
         description: "",
         apply: () => {
-          gun.increaseDamage();
+          this.player.increaseMoveSpeed();
         },
       });
     }
 
-    if (gun.canDecreaseFireRate(40)) {
+    if (this.player.canIncreaseIFrames()) {
       all.push({
-        title: "FIRE RATE -40ms",
+        title: "I-FRAMES +100ms",
         description: "",
         apply: () => {
-          gun.decreaseFireRate(40);
+          this.player.increaseIFrames();
         },
       });
     }
 
-    if (gun.canDecreaseReloadTime(150)) {
+    // Max HP (редко: 35% шанс добавить в пул)
+    if (this.player.canIncreaseMaxHp() && Math.random() < 0.35) {
       all.push({
-        title: "RELOAD -150ms",
+        title: "MAX HP +1",
         description: "",
         apply: () => {
-          gun.decreaseReloadTime(150);
+          this.player.increaseMaxHp();
+          this.updateHealthText();
         },
       });
     }
 
-    if (gun.canIncreaseMagazine(1)) {
-      all.push({
-        title: "MAGAZINE +1",
-        description: "",
-        apply: () => {
-          gun.increaseMagazine(1);
-        },
-      });
+    // 3) Новое оружие: SHOTGUN (только если level >= 6 и не shotgun уже)
+    if (this.level >= 6 && this.weapon.key !== "shotgun") {
+      if (Math.random() < 0.3) {
+        // 30% шанс добавить в пул
+        all.push({
+          title: "NEW WEAPON: SHOTGUN",
+          description: "",
+          apply: () => {
+            this.switchWeaponTo("shotgun");
+          },
+        });
+      }
     }
 
-    // Если доступных улучшений меньше 3, возвращаем все доступные
-    if (all.length === 0) {
-      return [];
-    }
-
-    // Перемешиваем и берем 3 случайных
+    // Перемешиваем основной пул
     Phaser.Utils.Array.Shuffle(all);
-    return all.slice(0, 3);
+
+    // Берём первые 3
+    let selected = all.slice(0, 3);
+
+    // 4) Fallback логика: если меньше 3, добиваем fallback опциями
+    if (selected.length < 3) {
+      const fallbacks: LevelUpOption[] = [];
+
+      // HEAL +1 (если не полное HP)
+      if (this.player.getHealth() < this.player.getMaxHealth()) {
+        fallbacks.push({
+          title: "HEAL +1",
+          description: "",
+          apply: () => {
+            this.player.applyHeal(1);
+            this.updateHealthText();
+          },
+        });
+      }
+
+      // MAX HP +1 (если можно)
+      if (this.player.canIncreaseMaxHp()) {
+        fallbacks.push({
+          title: "MAX HP +1",
+          description: "",
+          apply: () => {
+            this.player.increaseMaxHp();
+            this.updateHealthText();
+          },
+        });
+      }
+
+      // NEW WEAPON (если доступно)
+      if (this.level >= 6 && this.weapon.key !== "shotgun") {
+        fallbacks.push({
+          title: "NEW WEAPON: SHOTGUN",
+          description: "",
+          apply: () => {
+            this.switchWeaponTo("shotgun");
+          },
+        });
+      }
+
+      // MOVE SPEED (если можно)
+      if (this.player.canIncreaseMoveSpeed()) {
+        fallbacks.push({
+          title: "MOVE SPEED +5%",
+          description: "",
+          apply: () => {
+            this.player.increaseMoveSpeed();
+          },
+        });
+      }
+
+      // I-FRAMES (если можно)
+      if (this.player.canIncreaseIFrames()) {
+        fallbacks.push({
+          title: "I-FRAMES +100ms",
+          description: "",
+          apply: () => {
+            this.player.increaseIFrames();
+          },
+        });
+      }
+
+      // Убираем дубликаты из fallbacks (те что уже в selected)
+      const selectedTitles = new Set(selected.map((opt) => opt.title));
+      const uniqueFallbacks = fallbacks.filter(
+        (opt) => !selectedTitles.has(opt.title)
+      );
+
+      // Добавляем fallbacks до 3 опций
+      selected = [...selected, ...uniqueFallbacks].slice(0, 3);
+    }
+
+    // 5) Если всё равно 0 (теоретически), показываем CONTINUE
+    if (selected.length === 0) {
+      selected.push({
+        title: "CONTINUE",
+        description: "",
+        apply: () => {
+          // Просто продолжаем игру
+        },
+      });
+    }
+
+    return selected;
   }
 
 
   private updateXPText() {
-    this.xpText.setText(
-      `LVL: ${this.level}  XP: ${this.xp}/${this.xpToNextLevel}`
-    );
+    const needed = this.getXPToNextLevel(this.level);
+    this.xpText.setText(`LVL: ${this.level}  XP: ${this.xp}/${needed}`);
   }
 
   private updateAmmoUI(time: number) {
-    if (!this.weapon || !(this.weapon instanceof BasicGun)) {
+    if (!this.weapon) {
       return;
     }
 
-    const gun = this.weapon as BasicGun;
-    const ammo = gun.getAmmo();
-    const magazineSize = gun.getMagazineSize();
-    const isReloading = gun.getIsReloading();
-    const reloadProgress = gun.getReloadProgress(time);
+    const ammo = this.weapon.getAmmoInMag();
+    const magazineSize = this.weapon.getMagazineSize();
+    const isReloading = this.weapon.isReloading();
 
     // Обновляем текст патронов
     this.ammoText.setText(`Ammo: ${ammo}/${magazineSize}`);
@@ -625,6 +983,18 @@ export class GameScene extends Phaser.Scene {
     if (isReloading) {
       this.reloadProgressBarBg.setVisible(true);
       this.reloadProgressBar.setVisible(true);
+
+      // Получаем прогресс перезарядки
+      let reloadProgress = 0;
+      if (this.weapon.key === "pistol") {
+        reloadProgress = (this.weapon as BasicGun).getReloadProgressWithTime(
+          time
+        );
+      } else if (this.weapon.key === "shotgun") {
+        reloadProgress = (this.weapon as Shotgun).getReloadProgressWithTime(
+          time
+        );
+      }
 
       // Обновляем ширину прогресс-бара (0-200px)
       const barWidth = 200 * reloadProgress;
@@ -635,17 +1005,65 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  private updateSpawnTimer() {
-    if (this.gameOver) {
+  private switchWeaponTo(key: "pistol" | "shotgun") {
+    if (this.weapon?.key === key) {
       return;
     }
 
+    // Статистика: смена оружия
+    this.stats.weaponSwitches++;
+    this.stats.weaponCurrent = this.weapon.getStats().name;
+
+    // Заменяем оружие
+    if (key === "pistol") {
+      this.weapon = new BasicGun({});
+    } else if (key === "shotgun") {
+      this.weapon = new Shotgun();
+    }
+
+    this.weapon.refillAndReset();
+    this.updateAmmoUI(this.time.now);
+  }
+
+  // updateSpawnTimer больше не используется - теперь используем updateSpawnTimerByPhase
+  // private updateSpawnTimer() {
+  //   if (this.gameOver) {
+  //     return;
+  //   }
+  //
+  //   if (this.spawnEvent) {
+  //     this.spawnEvent.remove(false);
+  //   }
+  //
+  //   this.spawnEvent = this.time.addEvent({
+  //     delay: this.currentSpawnDelay,
+  //     loop: true,
+  //     callback: this.spawnEnemy,
+  //     callbackScope: this,
+  //   });
+  // }
+
+  private updateSpawnTimerByPhase() {
+    if (this.gameOver || !this.isStarted) {
+      return;
+    }
+
+    const settings = this.getPhaseSettings(this.currentPhase);
+    const delay = settings.spawnDelayMs;
+
+    // Если уже есть timer и delay совпадает — ничего не делать
+    if (this.spawnEvent && this.currentSpawnDelay === delay) {
+      return;
+    }
+
+    // Иначе уничтожить старый timer и создать новый
     if (this.spawnEvent) {
       this.spawnEvent.remove(false);
     }
 
+    this.currentSpawnDelay = delay;
     this.spawnEvent = this.time.addEvent({
-      delay: this.currentSpawnDelay,
+      delay: delay,
       loop: true,
       callback: this.spawnEnemy,
       callbackScope: this,
@@ -698,10 +1116,12 @@ export class GameScene extends Phaser.Scene {
     switch (loot.lootType) {
       case "heal":
         this.player.applyHeal(1);
+        this.stats.healsPicked++;
         this.updateHealthText();
         break;
       case "speed":
         this.player.applySpeedBoost(1.5, 4000); // x1.5 на 4 секунды
+        this.stats.speedPicked++;
         break;
     }
 
@@ -714,6 +1134,9 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.gameOver = true;
+
+    // Печатаем статистику при Game Over
+    this.printMatchSummary("GAME_OVER");
 
     if (this.spawnEvent) {
       this.spawnEvent.remove(false);
@@ -749,8 +1172,30 @@ export class GameScene extends Phaser.Scene {
 
     this.isStarted = true;
 
-    // Стартуем спавн и прочее
-    this.updateSpawnTimer();
+    // Устанавливаем время начала забега
+    this.runStartTime = this.time.now;
+    this.currentPhase = 1;
+
+    // Обновляем статистику при старте
+    this.stats.startedAtMs = this.time.now;
+    this.stats.weaponStart = this.weapon.getStats().name;
+    this.stats.weaponCurrent = this.weapon.getStats().name;
+
+    // Стартуем спавн по фазе
+    this.updateSpawnTimerByPhase();
+
+    // Опционально: debug текст фазы
+    if (this.debugEnabled) {
+      const settings = this.getPhaseSettings(this.currentPhase);
+      this.phaseText = this.add.text(16, 60, "", {
+        fontSize: "14px",
+        color: "#ffff00",
+      });
+      this.phaseText.setScrollFactor(0);
+      this.phaseText.setText(
+        `PHASE: ${this.currentPhase} | Max: ${settings.maxAliveEnemies} | Delay: ${settings.spawnDelayMs}ms`
+      );
+    }
 
     // Выключаем мерцание
     if (this.startHintTween) {
@@ -790,5 +1235,65 @@ export class GameScene extends Phaser.Scene {
         }
       },
     });
+  }
+
+  private resetMatchStats(): void {
+    this.stats = {
+      startedAtMs: this.time.now,
+      endedAtMs: null,
+      score: 0,
+      level: 1,
+      phase: 1,
+      shotsFired: 0,
+      shotsHit: 0,
+      killsTotal: 0,
+      killsRunner: 0,
+      killsTank: 0,
+      damageTaken: 0,
+      healsPicked: 0,
+      speedPicked: 0,
+      weaponStart: this.weapon?.getStats()?.name ?? "PISTOL",
+      weaponCurrent: this.weapon?.getStats()?.name ?? "PISTOL",
+      weaponSwitches: 0,
+    };
+  }
+
+  private printMatchSummary(
+    reason: "GAME_OVER" | "RESTART" | "MANUAL"
+  ): void {
+    // Обновляем текущие значения
+    this.stats.score = this.score;
+    this.stats.level = this.level;
+    this.stats.phase = this.currentPhase;
+    this.stats.weaponCurrent = this.weapon?.getStats()?.name ?? "UNKNOWN";
+
+    // Фиксируем время окончания, если ещё не зафиксировано
+    if (this.stats.endedAtMs === null) {
+      this.stats.endedAtMs = this.time.now;
+    }
+
+    const durationSec =
+      (this.stats.endedAtMs - this.stats.startedAtMs) / 1000;
+    const accuracy =
+      this.stats.shotsFired > 0
+        ? (this.stats.shotsHit / this.stats.shotsFired) * 100
+        : 0;
+
+    console.groupCollapsed(
+      `[MATCH] ${reason} | ${durationSec.toFixed(1)}s | score=${this.stats.score} lvl=${this.stats.level} phase=${this.stats.phase}`
+    );
+    console.log(
+      `Weapon: ${this.stats.weaponStart} -> ${this.stats.weaponCurrent} (switches: ${this.stats.weaponSwitches})`
+    );
+    console.log(
+      `Shots: fired=${this.stats.shotsFired}, hit=${this.stats.shotsHit}, acc=${accuracy.toFixed(1)}%`
+    );
+    console.log(
+      `Kills: total=${this.stats.killsTotal} (runner=${this.stats.killsRunner}, tank=${this.stats.killsTank})`
+    );
+    console.log(
+      `Player: damageTaken=${this.stats.damageTaken}, heals=${this.stats.healsPicked}, speed=${this.stats.speedPicked}`
+    );
+    console.groupEnd();
   }
 }
