@@ -4,8 +4,10 @@ import { Bullet } from "../entities/Bullet";
 import { Enemy } from "../entities/Enemy";
 import { LootPickup, LootType } from "../entities/LootPickup";
 import { Weapon } from "../weapons/types";
-import { BasicGun } from "../weapons/BasicGun";
-import { Shotgun } from "../weapons/Shotgun";
+// BasicGun and Shotgun moved to WeaponSystem
+// TODO: Remove after full integration
+// import { BasicGun } from "../weapons/BasicGun";
+// import { Shotgun } from "../weapons/Shotgun";
 import { LevelUpOption } from "../ui/LevelUpOverlay";
 import { StageSystem } from "../systems/StageSystem";
 import {
@@ -13,6 +15,7 @@ import {
   EnemyType as SpawnEnemyType,
 } from "../systems/SpawnSystem";
 import { BuffSystem } from "../systems/BuffSystem";
+import { WeaponSystem } from "../systems/WeaponSystem";
 
 import playerSvg from "../assets/player.svg?url";
 import enemySvg from "../assets/enemy.svg?url";
@@ -88,8 +91,8 @@ type MatchStats = {
   level: number;
   phase: number;
 
-  shotsFired: number; // реально выпущенные пули
-  shotsHit: number; // попадания по врагам
+  shotsFiredProjectiles: number; // количество созданных пуль/проектайлов
+  shotsHitProjectiles: number; // количество попаданий по врагам (каждое попадание = +1)
   killsTotal: number;
   killsRunner: number;
   killsTank: number;
@@ -101,6 +104,10 @@ type MatchStats = {
   weaponStart: string; // "PISTOL"
   weaponCurrent: string; // "PISTOL"/"SHOTGUN"
   weaponSwitches: number;
+
+  // Legacy fields for backward compatibility (deprecated)
+  shotsFired: number; // @deprecated Use shotsFiredProjectiles
+  shotsHit: number; // @deprecated Use shotsHitProjectiles
 };
 
 const PHASES: PhaseSettings[] = [
@@ -170,7 +177,9 @@ export class GameScene extends Phaser.Scene {
   private startTitleText?: Phaser.GameObjects.Text;
   private startHintText?: Phaser.GameObjects.Text;
   private startHintTween?: Phaser.Tweens.Tween;
-  private suppressShootingUntil = 0; // timestamp in ms (scene.time.now)
+  // suppressShootingUntil moved to WeaponSystem
+  // TODO: Remove after full integration
+  // private suppressShootingUntil = 0;
   private isLevelUpOpen = false;
   private isStageClear = false;
   private debugEnabled = false;
@@ -181,6 +190,9 @@ export class GameScene extends Phaser.Scene {
   private restartKey!: Phaser.Input.Keyboard.Key;
   private continueKey!: Phaser.Input.Keyboard.Key;
   private loot!: Phaser.Physics.Arcade.Group;
+  // Weapon moved to WeaponSystem
+  // TODO: Remove after full integration
+  // @ts-ignore - kept for compatibility with existing code that might reference it
   private weapon!: Weapon;
   private stageClearOverlay?: Phaser.GameObjects.Container;
 
@@ -197,6 +209,9 @@ export class GameScene extends Phaser.Scene {
 
   // Buff system (moved to BuffSystem)
   private buffSystem!: BuffSystem;
+
+  // Weapon system (moved to WeaponSystem)
+  private weaponSystem!: WeaponSystem;
 
   // Match stats
   private stats!: MatchStats;
@@ -293,11 +308,7 @@ export class GameScene extends Phaser.Scene {
       runChildUpdate: false,
     });
 
-    // Оружие: стартовый пистолет
-    this.weapon = new BasicGun({});
-    this.weapon.refillAndReset();
-
-    // Инициализируем статистику после создания оружия
+    // Инициализируем статистику (weaponSystem будет инициализирован после)
     this.resetMatchStats();
 
     // Инициализируем SpawnSystem
@@ -371,10 +382,7 @@ export class GameScene extends Phaser.Scene {
           // Log is already done in startBuff
         } else {
           // DOUBLE ended: restore normal ammo behavior
-          const weapon = this.weapon as any;
-          if (weapon.ammo !== undefined && weapon.ammo <= 0) {
-            weapon.refillAndReset();
-          }
+          // This is handled by WeaponSystem internally
         }
       },
       onRapidFireMultiplierChanged: (_mult: number) => {
@@ -395,6 +403,47 @@ export class GameScene extends Phaser.Scene {
       },
       log: (msg: string) => {
         console.log(msg);
+      },
+    });
+
+    // Инициализируем WeaponSystem
+    this.weaponSystem = new WeaponSystem({
+      getIsActive: () => {
+        return (
+          !this.gameOver &&
+          this.player.isAlive() &&
+          this.isStarted &&
+          !this.isLevelUpOpen &&
+          !this.isStageClear
+        );
+      },
+      getTimeNow: () => this.time.now,
+      getPlayerPos: () => ({ x: this.player.x, y: this.player.y }),
+      getAimAngle: () => {
+        const pointer = this.input.activePointer;
+        return Phaser.Math.Angle.Between(
+          this.player.x,
+          this.player.y,
+          pointer.worldX,
+          pointer.worldY
+        );
+      },
+      isBuffActive: (type: "rapid" | "double") => {
+        return this.buffSystem.isActive(type);
+      },
+      canBypassReload: () => {
+        return this.buffSystem.isActive("double");
+      },
+      getScene: () => this,
+      getBulletsGroup: () => this.bullets,
+      getPlayerPierceLevel: () => this.playerPierceLevel,
+      scheduleDelayedCall: (delayMs: number, callback: () => void) => {
+        this.time.delayedCall(delayMs, callback);
+      },
+      onShotFired: (projectilesCount: number) => {
+        this.stats.shotsFiredProjectiles += projectilesCount;
+        // Legacy: keep shotsFired for backward compatibility
+        this.stats.shotsFired += projectilesCount;
       },
     });
 
@@ -651,136 +700,25 @@ export class GameScene extends Phaser.Scene {
     }
 
     if (!this.isStageClear) {
-      this.handleShooting(time);
+      // Update weapon system
+      this.weaponSystem.update();
+
+      // Handle shooting input
+      const pointer = this.input.activePointer;
+      if (pointer.isDown) {
+        this.weaponSystem.tryShoot();
+      }
       this.updateAmmoUI(time);
     }
   }
 
-  // ЛКМ → выстрел в сторону курсора
+  // Shooting logic moved to WeaponSystem
+  // TODO: Remove deprecated method after full integration
+  // @deprecated Use weaponSystem.tryShoot() instead
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  // @ts-ignore - deprecated method, kept for compatibility
   private handleShooting(time: number) {
-    if (
-      this.gameOver ||
-      !this.player.isAlive() ||
-      !this.isStarted ||
-      this.isLevelUpOpen ||
-      this.isStageClear
-    ) {
-      return;
-    }
-
-    // Блокируем стрельбу на короткое время после старта
-    if (this.time.now < this.suppressShootingUntil) {
-      return;
-    }
-
-    const pointer = this.input.activePointer;
-    const aimAngle = Phaser.Math.Angle.Between(
-      this.player.x,
-      this.player.y,
-      pointer.worldX,
-      pointer.worldY
-    );
-
-    // Проверяем, что кнопка мыши нажата
-    if (!pointer.isDown) {
-      return;
-    }
-
-    // Apply RAPID buff: reduce fire rate by 50%
-    const rapidActive = this.buffSystem.isActive("rapid");
-    const baseFireRate = this.weapon.getStats().fireRateMs;
-    const effectiveFireRate = rapidActive ? baseFireRate * 0.5 : baseFireRate;
-
-    // Check fire rate with buff
-    const weaponLastShot = (this.weapon as any).lastShotTime || 0;
-    if (time < weaponLastShot + effectiveFireRate) {
-      return;
-    }
-
-    // DOUBLE buff: weapon-specific behavior
-    const doubleActive = this.buffSystem.isActive("double");
-    const isShotgun = this.weapon.key === "shotgun";
-    const weapon = this.weapon as any;
-
-    // Track if first shot succeeded
-    let firstShotSucceeded = false;
-
-    // DOUBLE buff: bypass ammo/reload (infinite ammo)
-    const bypassAmmo = doubleActive;
-
-    // First shot: use weapon.tryFire (handles ammo, reload, fireRate update)
-    this.weapon.tryFire({
-      scene: this,
-      time,
-      playerX: this.player.x,
-      playerY: this.player.y,
-      aimAngle: aimAngle,
-      bullets: this.bullets,
-      bypassAmmo: bypassAmmo,
-      onBulletSpawned: (bullet: Bullet) => {
-        firstShotSucceeded = true;
-        this.stats.shotsFired++;
-        // Применяем pierce perk к пуле (only from Stage Clear perk)
-        if (this.playerPierceLevel > 0) {
-          bullet.pierceLeft = this.playerPierceLevel;
-        }
-      },
-    });
-
-    // DOUBLE buff: weapon-specific second shot
-    if (doubleActive && firstShotSucceeded && !weapon._isReloading) {
-      if (isShotgun) {
-        // Shotgun: schedule second shot after 100ms delay (bypassAmmo for DOUBLE)
-        this.time.delayedCall(100, () => {
-          // Check buff still active and weapon still ready (bypassAmmo means no ammo check needed)
-          if (
-            !this.buffSystem.isActive("double") ||
-            (weapon._isReloading && !bypassAmmo)
-          ) {
-            return;
-          }
-          // Fire second shotgun shot (bypassAmmo=true for DOUBLE)
-          this.weapon.tryFire({
-            scene: this,
-            time: this.time.now,
-            playerX: this.player.x,
-            playerY: this.player.y,
-            aimAngle: aimAngle,
-            bullets: this.bullets,
-            bypassAmmo: true, // DOUBLE buff: infinite ammo
-            onBulletSpawned: (bullet: Bullet) => {
-              this.stats.shotsFired++;
-              // Apply pierce perk (only from Stage Clear perk)
-              if (this.playerPierceLevel > 0) {
-                bullet.pierceLeft = this.playerPierceLevel;
-              }
-            },
-          });
-        });
-      } else {
-        // Pistol: spawn second bullet immediately with spread (no extra ammo cost)
-        const spreadAngle = 0.08; // +/- 0.08 rad for double shot
-        const bulletAngle = aimAngle + spreadAngle;
-        const bullet = new Bullet(this, this.player.x, this.player.y);
-        this.bullets.add(bullet);
-
-        // Count as fired
-        this.stats.shotsFired++;
-
-        // Apply pierce perk (only from Stage Clear perk)
-        if (this.playerPierceLevel > 0) {
-          bullet.pierceLeft = this.playerPierceLevel;
-        }
-
-        // Set velocity
-        const speed = bullet.speed;
-        const vx = Math.cos(bulletAngle) * speed;
-        const vy = Math.sin(bulletAngle) * speed;
-        const body = bullet.body as Phaser.Physics.Arcade.Body;
-        body.setVelocity(vx, vy);
-        body.setAllowGravity(false);
-      }
-    }
+    // Moved to weaponSystem.tryShoot()
   }
 
   // Спавн врага по краям экрана (вызывается из SpawnSystem)
@@ -880,7 +818,9 @@ export class GameScene extends Phaser.Scene {
     // Визуальный фидбек до уничтожения пули
     enemy.applyHitFeedback(bullet.x, bullet.y, this.time.now);
 
-    // Статистика: попадание
+    // Статистика: попадание (каждое попадание пули в врага = +1)
+    this.stats.shotsHitProjectiles++;
+    // Legacy: keep shotsHit for backward compatibility
     this.stats.shotsHit++;
 
     // Наносим урон (урон игрока, без бонуса оружия)
@@ -1123,37 +1063,21 @@ export class GameScene extends Phaser.Scene {
     this.xpText.setText(`LVL: ${this.level}  XP: ${this.xp}/${needed}`);
   }
 
-  private updateAmmoUI(time: number) {
-    if (!this.weapon) {
+  private updateAmmoUI(_time: number) {
+    if (!this.weaponSystem) {
       return;
     }
 
-    const ammo = this.weapon.getAmmoInMag();
-    const magazineSize = this.weapon.getMagazineSize();
-    const isReloading = this.weapon.isReloading();
-
-    // Обновляем текст патронов
-    this.ammoText.setText(`Ammo: ${ammo}/${magazineSize}`);
+    const state = this.weaponSystem.getState();
+    this.ammoText.setText(`Ammo: ${state.ammoInMag}/${state.magazineSize}`);
 
     // Показываем/скрываем прогресс-бар перезарядки
-    if (isReloading) {
+    if (state.isReloading) {
       this.reloadProgressBarBg.setVisible(true);
       this.reloadProgressBar.setVisible(true);
 
-      // Получаем прогресс перезарядки
-      let reloadProgress = 0;
-      if (this.weapon.key === "pistol") {
-        reloadProgress = (this.weapon as BasicGun).getReloadProgressWithTime(
-          time
-        );
-      } else if (this.weapon.key === "shotgun") {
-        reloadProgress = (this.weapon as Shotgun).getReloadProgressWithTime(
-          time
-        );
-      }
-
       // Обновляем ширину прогресс-бара (0-200px)
-      const barWidth = 200 * reloadProgress;
+      const barWidth = 200 * state.reloadProgress01;
       this.reloadProgressBar.setSize(barWidth, 8);
     } else {
       this.reloadProgressBarBg.setVisible(false);
@@ -1164,22 +1088,21 @@ export class GameScene extends Phaser.Scene {
   // Метод для будущей реализации смены оружия при подборе weapon-drop
   // Пока не используется, но оставлен для будущей реализации
   private switchWeaponTo(key: "pistol" | "shotgun"): void {
-    if (this.weapon?.key === key) {
+    const weaponId: "PISTOL" | "SHOTGUN" =
+      key === "pistol" ? "PISTOL" : "SHOTGUN";
+
+    if (this.weaponSystem.getCurrentWeaponId() === weaponId) {
       return;
     }
 
     // Статистика: смена оружия
     this.stats.weaponSwitches++;
-    this.stats.weaponCurrent = this.weapon.getStats().name;
+    this.stats.weaponCurrent = this.weaponSystem
+      .getCurrentWeapon()
+      .getStats().name;
 
-    // Заменяем оружие
-    if (key === "pistol") {
-      this.weapon = new BasicGun({});
-    } else if (key === "shotgun") {
-      this.weapon = new Shotgun();
-    }
-
-    this.weapon.refillAndReset();
+    // Заменяем оружие через WeaponSystem
+    this.weaponSystem.switchWeapon(weaponId);
     this.updateAmmoUI(this.time.now);
   }
 
@@ -1512,7 +1435,7 @@ export class GameScene extends Phaser.Scene {
     this.input.activePointer.isDown = false;
 
     // Блокируем стрельбу на короткое время после старта
-    this.suppressShootingUntil = this.time.now + 200;
+    this.weaponSystem.setSuppressShootingUntil(this.time.now + 200);
 
     this.isStarted = true;
 
@@ -1525,8 +1448,15 @@ export class GameScene extends Phaser.Scene {
 
     // Обновляем статистику при старте
     this.stats.startedAtMs = this.time.now;
-    this.stats.weaponStart = this.weapon.getStats().name;
-    this.stats.weaponCurrent = this.weapon.getStats().name;
+    this.stats.weaponStart = this.weaponSystem
+      .getCurrentWeapon()
+      .getStats().name;
+    this.stats.weaponCurrent = this.weaponSystem
+      .getCurrentWeapon()
+      .getStats().name;
+
+    // Block shooting for short time after start
+    this.weaponSystem.setSuppressShootingUntil(this.time.now + 200);
 
     // Стартуем стабильный планировщик спавна
     this.spawnSystem.start(this.time.now);
@@ -1612,16 +1542,20 @@ export class GameScene extends Phaser.Scene {
       score: 0,
       level: 1,
       phase: 1,
-      shotsFired: 0,
-      shotsHit: 0,
+      shotsFiredProjectiles: 0,
+      shotsHitProjectiles: 0,
+      shotsFired: 0, // Legacy
+      shotsHit: 0, // Legacy
       killsTotal: 0,
       killsRunner: 0,
       killsTank: 0,
       damageTaken: 0,
       healsPicked: 0,
       speedPicked: 0,
-      weaponStart: this.weapon?.getStats()?.name ?? "PISTOL",
-      weaponCurrent: this.weapon?.getStats()?.name ?? "PISTOL",
+      weaponStart:
+        this.weaponSystem?.getCurrentWeapon()?.getStats()?.name ?? "PISTOL",
+      weaponCurrent:
+        this.weaponSystem?.getCurrentWeapon()?.getStats()?.name ?? "PISTOL",
       weaponSwitches: 0,
     };
   }
@@ -1631,7 +1565,8 @@ export class GameScene extends Phaser.Scene {
     this.stats.score = this.score;
     this.stats.level = this.level;
     this.stats.phase = this.currentPhase;
-    this.stats.weaponCurrent = this.weapon?.getStats()?.name ?? "UNKNOWN";
+    this.stats.weaponCurrent =
+      this.weaponSystem?.getCurrentWeapon()?.getStats()?.name ?? "UNKNOWN";
 
     // Фиксируем время окончания, если ещё не зафиксировано
     if (this.stats.endedAtMs === null) {
@@ -1639,22 +1574,16 @@ export class GameScene extends Phaser.Scene {
     }
 
     const durationSec = (this.stats.endedAtMs - this.stats.startedAtMs) / 1000;
-    // Проверка: hit не должен превышать fired
-    if (this.stats.shotsHit > this.stats.shotsFired) {
-      console.warn(
-        `[STATS BUG] hit > fired: fired=${this.stats.shotsFired}, hit=${this.stats.shotsHit}, weapon=${this.stats.weaponCurrent}`
-      );
-      // Исправляем: hit не может быть больше fired
-      this.stats.shotsHit = Math.min(
-        this.stats.shotsHit,
-        this.stats.shotsFired
-      );
-    }
 
+    // Calculate accuracy from projectiles (guaranteed <= 100%)
     const accuracy =
-      this.stats.shotsFired > 0
-        ? (this.stats.shotsHit / this.stats.shotsFired) * 100
+      this.stats.shotsFiredProjectiles > 0
+        ? (this.stats.shotsHitProjectiles / this.stats.shotsFiredProjectiles) *
+          100
         : 0;
+
+    // Ensure accuracy is never > 100% (safety check)
+    const clampedAccuracy = Math.min(100.0, Math.max(0, accuracy));
 
     console.groupCollapsed(
       `[MATCH] ${reason} | ${durationSec.toFixed(1)}s | score=${
@@ -1665,9 +1594,9 @@ export class GameScene extends Phaser.Scene {
       `Weapon: ${this.stats.weaponStart} -> ${this.stats.weaponCurrent} (switches: ${this.stats.weaponSwitches})`
     );
     console.log(
-      `Shots: fired=${this.stats.shotsFired}, hit=${
-        this.stats.shotsHit
-      }, acc=${accuracy.toFixed(1)}%`
+      `Shots: proj fired=${this.stats.shotsFiredProjectiles}, hit=${
+        this.stats.shotsHitProjectiles
+      }, acc=${clampedAccuracy.toFixed(1)}%`
     );
     console.log(
       `Kills: total=${this.stats.killsTotal} (runner=${this.stats.killsRunner}, tank=${this.stats.killsTank})`
