@@ -138,10 +138,10 @@ export class MatchStatsSystem {
     const fired = this.shotsFiredProjectiles;
     const hit = this.shotsHitProjectiles;
 
-    // Debug: warn if hit > fired (should not happen after fix)
-    if (hit > fired) {
-      console.warn("[STATS] hit>fired", { fired, hit });
-    }
+    // TODO: With pierce, hit can be >= fired (one projectile can hit multiple enemies)
+    // hit = количество попаданий, fired = количество выпущенных снарядов
+    // After fix: hit should never exceed fired due to duplicate overlaps/callbacks
+    // If hit > fired, it indicates a bug (duplicate hit counting), not pierce behavior
 
     const accuracy = fired > 0 ? (hit / fired) * 100 : 0;
 

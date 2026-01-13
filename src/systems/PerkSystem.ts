@@ -1,11 +1,10 @@
-import { LevelUpOption } from "../ui/LevelUpOverlay";
-
 export type PerkId = "pierce" | "knockback" | "magnet" | "heal_on_clear" | "bullet_size";
 
 export interface PerkDef {
   id: PerkId;
   title: string;
-  description: string;
+  desc: string;
+  maxLevel?: number;
 }
 
 export interface PerkSystemCallbacks {
@@ -22,94 +21,125 @@ export interface PerkSystemCallbacks {
 export class PerkSystem {
   private callbacks: PerkSystemCallbacks;
 
-  // Perk levels
-  private pierceLevel = 0;
-  private knockbackLevel = 0;
-  private magnetLevel = 0;
-  private bulletSizeLevel = 0;
+  // Perk levels stored as Record<PerkId, number>
+  private levels: Record<PerkId, number> = {
+    pierce: 0,
+    knockback: 0,
+    magnet: 0,
+    heal_on_clear: 0,
+    bullet_size: 0,
+  };
 
   constructor(callbacks: PerkSystemCallbacks) {
     this.callbacks = callbacks;
   }
 
   /**
-   * Get available perks for selection (returns 3 random perks)
+   * Get all perk definitions
    */
-  getAvailablePerks(): LevelUpOption[] {
-    const all: LevelUpOption[] = [];
-
-    // 1) PIERCE +1
-    all.push({
-      title: "PIERCE +1",
-      description: "",
-      apply: () => {
-        this.applyPerk("pierce");
+  getAllDefs(): PerkDef[] {
+    return [
+      {
+        id: "pierce",
+        title: "PIERCE +1",
+        desc: "",
+        // No maxLevel - can be upgraded unlimited times
       },
+      {
+        id: "knockback",
+        title: "KNOCKBACK +25%",
+        desc: "",
+        // No maxLevel - can be upgraded unlimited times
+      },
+      {
+        id: "magnet",
+        title: "MAGNET +20%",
+        desc: "",
+        // No maxLevel - can be upgraded unlimited times
+      },
+      {
+        id: "heal_on_clear",
+        title: "HEAL ON CLEAR",
+        desc: "",
+        maxLevel: 1, // Can only be picked once
+      },
+      {
+        id: "bullet_size",
+        title: "BULLET SIZE +30%",
+        desc: "",
+        // No maxLevel - can be upgraded unlimited times
+      },
+    ];
+  }
+
+  /**
+   * Get random unique perks that haven't reached maxLevel
+   * @param count Number of perks to return (default: 3)
+   * @param rng Optional random number generator (default: Phaser's shuffle)
+   */
+  getRandomPick(count: number = 3, rng?: () => number): PerkDef[] {
+    const allDefs = this.getAllDefs();
+
+    // Filter out perks that have reached maxLevel
+    const available = allDefs.filter((def) => {
+      const currentLevel = this.levels[def.id];
+      if (def.maxLevel !== undefined) {
+        return currentLevel < def.maxLevel;
+      }
+      return true; // No maxLevel means always available
     });
 
-    // 2) KNOCKBACK +25%
-    all.push({
-      title: "KNOCKBACK +25%",
-      description: "",
-      apply: () => {
-        this.applyPerk("knockback");
-      },
-    });
-
-    // 3) MAGNET +20%
-    all.push({
-      title: "MAGNET +20%",
-      description: "",
-      apply: () => {
-        this.applyPerk("magnet");
-      },
-    });
-
-    // 4) HEAL ON CLEAR
-    all.push({
-      title: "HEAL ON CLEAR",
-      description: "",
-      apply: () => {
-        this.applyPerk("heal_on_clear");
-      },
-    });
-
-    // 5) BULLET SIZE +30%
-    all.push({
-      title: "BULLET SIZE +30%",
-      description: "",
-      apply: () => {
-        this.applyPerk("bullet_size");
-      },
-    });
-
-    // Перемешиваем и берём 3 уникальных перка
-    Phaser.Utils.Array.Shuffle(all);
-    return all.slice(0, 3);
+    // Shuffle using provided RNG or Phaser's default
+    if (rng) {
+      // Custom RNG: Fisher-Yates shuffle
+      const shuffled = [...available];
+      for (let i = shuffled.length - 1; i > 0; i--) {
+        const j = Math.floor(rng() * (i + 1));
+        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+      }
+      return shuffled.slice(0, count);
+    } else {
+      // Use Phaser's shuffle
+      Phaser.Utils.Array.Shuffle(available);
+      return available.slice(0, count);
+    }
   }
 
   /**
    * Apply a perk by ID
+   * Increases level and applies effect through callbacks
+   * If maxLevel is reached, level is not increased further
    */
-  applyPerk(perkId: PerkId): void {
-    switch (perkId) {
+  apply(id: PerkId): void {
+    const def = this.getAllDefs().find((d) => d.id === id);
+    if (!def) {
+      return;
+    }
+
+    // Check maxLevel
+    const currentLevel = this.levels[id];
+    if (def.maxLevel !== undefined && currentLevel >= def.maxLevel) {
+      return; // Already at max level
+    }
+
+    // Increase level
+    this.levels[id]++;
+
+    // Apply effect through callbacks
+    switch (id) {
       case "pierce":
-        this.pierceLevel++;
-        this.callbacks.onPierceChanged(this.pierceLevel);
+        this.callbacks.onPierceChanged(this.levels[id]);
         break;
       case "knockback":
-        this.knockbackLevel++;
         this.callbacks.onKnockbackChanged(0.25);
         break;
       case "magnet":
-        this.magnetLevel++;
         this.callbacks.onMagnetChanged(0.2);
         break;
       case "heal_on_clear":
         this.callbacks.onHealOnClear();
         break;
       case "bullet_size":
-        this.bulletSizeLevel++;
         this.callbacks.onBulletSizeChanged(0.3);
         break;
     }
@@ -119,28 +149,26 @@ export class PerkSystem {
    * Reset all perk levels
    */
   reset(): void {
-    this.pierceLevel = 0;
-    this.knockbackLevel = 0;
-    this.magnetLevel = 0;
-    this.bulletSizeLevel = 0;
+    this.levels = {
+      pierce: 0,
+      knockback: 0,
+      magnet: 0,
+      heal_on_clear: 0,
+      bullet_size: 0,
+    };
   }
 
   /**
    * Get current perk level
    */
-  getPerkLevel(perkId: PerkId): number {
-    switch (perkId) {
-      case "pierce":
-        return this.pierceLevel;
-      case "knockback":
-        return this.knockbackLevel;
-      case "magnet":
-        return this.magnetLevel;
-      case "bullet_size":
-        return this.bulletSizeLevel;
-      case "heal_on_clear":
-        return 0; // Heal on clear doesn't have a level
-    }
+  getLevel(id: PerkId): number {
+    return this.levels[id];
+  }
+
+  /**
+   * @deprecated Use getLevel() instead
+   */
+  getPerkLevel(id: PerkId): number {
+    return this.getLevel(id);
   }
 }
-

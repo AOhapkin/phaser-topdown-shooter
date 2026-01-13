@@ -1,7 +1,7 @@
 import Phaser from "phaser";
 import { Player } from "../entities/Player";
 import { Bullet } from "../entities/Bullet";
-import { Enemy } from "../entities/Enemy";
+import { Enemy, EnemyType } from "../entities/Enemy";
 import { LootPickup, LootType } from "../entities/LootPickup";
 // Weapon, BasicGun, and Shotgun moved to WeaponSystem
 // LevelUpOption import removed - now handled by PerkSystem
@@ -16,6 +16,8 @@ import { OverlaySystem } from "../systems/OverlaySystem";
 import { MatchStatsSystem } from "../systems/MatchStatsSystem";
 import { StageResultSystem } from "../systems/StageResultSystem";
 import { PerkSystem } from "../systems/PerkSystem";
+import { LootDropSystem } from "../systems/LootDropSystem";
+import { EnemySystem } from "../systems/EnemySystem";
 
 import playerSvg from "../assets/player.svg?url";
 import enemySvg from "../assets/enemy.svg?url";
@@ -57,27 +59,7 @@ const BURST_RUNNER_WEIGHT_BOOST = 1.3; // 30% boost to runner weight
 const BURST_SPEED_BOOST = 1.12; // 12% speed increase
 const RECOVERY_SPAWN_MULTIPLIER = 1.2; // 20% slower spawn (multiply delay by 1.2)
 
-// Weapon-drop spawn constraints
-const WEAPON_DROP_BASE_CHANCE = 0.003; // 0.3% per enemy death
-const WEAPON_DROP_COOLDOWN_MS = 30000; // 30 seconds cooldown
-
-// Buff durations (ms) - moved to BuffSystem.ts
-// TODO: Remove these constants after full integration
-// const BUFF_RAPID_DURATION_MS = 8000;
-// const BUFF_DOUBLE_DURATION_MS = 10000;
-// const BUFF_FREEZE_DURATION_MS = 6000;
-// const BUFF_MAX_DURATION_MS = 20000;
-
-// Buff drop parameters
-const BUFF_DROP_COOLDOWN_MS = 12000; // Global cooldown for buff drops (ms)
-const BUFF_DROP_CHANCE = 0.18; // Chance to attempt buff drop on event (e.g., enemy kill)
-const BUFF_MAX_ON_MAP = 1; // Maximum buff loot items on map simultaneously
-
-// Buff type weights (for selection when drop is attempted)
-// Total: 100% (freeze: 45%, rapid: 35%, double: 20%)
-const BUFF_FREEZE_WEIGHT = 0.45;
-const BUFF_RAPID_WEIGHT = 0.35;
-const BUFF_DOUBLE_WEIGHT = 0.2;
+// Weapon-drop and buff drop parameters moved to LootDropSystem
 
 // Buff types (moved to BuffSystem, keeping for compatibility)
 // TODO: Remove after full integration
@@ -130,6 +112,7 @@ const PHASES: PhaseSettings[] = [
 
 export class GameScene extends Phaser.Scene {
   private player!: Player;
+  private bulletsEnemiesOverlap: Phaser.Physics.Arcade.Collider | null = null; // Track overlap to prevent duplicates
   private bullets!: Phaser.Physics.Arcade.Group;
   private enemies!: Phaser.Physics.Arcade.Group;
 
@@ -196,20 +179,20 @@ export class GameScene extends Phaser.Scene {
 
   // Perk system
   private perkSystem!: PerkSystem;
+
+  // Loot drop system
+  private lootDropSystem!: LootDropSystem;
+
+  // Enemy system
+  private enemySystem!: EnemySystem;
+
   private debugLogs = false; // выключить шумные логи
 
   // Stage Clear perks (moved to PerkSystem)
   // playerPierceLevel is synced with PerkSystem via callback onPierceChanged
   private playerPierceLevel = 0;
 
-  // Weapon-drop constraints
-  private lastWeaponDropTime = 0; // Time when weapon-drop was spawned or picked
-
-  // Buff loot tracking
-  private lastBuffDropTime = 0; // Time when last buff loot was dropped
-  private activeBuffLoot = new Set<LootPickup>(); // Track active buff loot items
-  private lastCooldownLogTime = 0; // Throttle cooldown logs (log at most once per second)
-  private cooldownLogSkipCount = 0; // Count skipped cooldown logs
+  // Weapon-drop and buff loot tracking moved to LootDropSystem
 
   // Buff system moved to BuffSystem
   private buffHudText?: Phaser.GameObjects.Text;
@@ -329,10 +312,10 @@ export class GameScene extends Phaser.Scene {
 
           return { runner: runnerWeight, tank: tankWeight };
         },
-        getAliveEnemiesCount: () => this.enemies.countActive(true),
-        getAliveTanksCount: () => this.getAliveTanksCount(),
+        getAliveEnemiesCount: () => this.enemySystem.getAliveCount(),
+        getAliveTanksCount: () => this.enemySystem.getTankAliveCount(),
         spawnEnemy: (chosenType: SpawnEnemyType) => {
-          this.spawnEnemyByType(chosenType);
+          this.enemySystem.spawn(chosenType);
         },
         logSpawnDebug: (msg: string) => {
           if (this.debugLogs) {
@@ -477,12 +460,12 @@ export class GameScene extends Phaser.Scene {
         // Обновляем таймер спавна при изменении burst state
         this.spawnSystem.onParamsChanged(this.time.now);
         // Применяем speed boost ко всем активным врагам
-        this.applyBurstSpeedToEnemies(true);
+        this.enemySystem.applySpeedMultiplier(BURST_SPEED_BOOST);
       },
       onBurstEnd: () => {
         console.log(`[BURST] END`);
         // Убираем speed boost
-        this.applyBurstSpeedToEnemies(false);
+        this.enemySystem.applySpeedMultiplier(1.0);
         // Обновляем таймер спавна при изменении burst state
         this.spawnSystem.onParamsChanged(this.time.now);
       },
@@ -498,6 +481,10 @@ export class GameScene extends Phaser.Scene {
       this.stageSystem
     );
 
+    // Инициализируем LootDropSystem (after loot group is created)
+    // Note: loot group will be created below, so we initialize LootDropSystem after it
+    // Actually, we need to initialize it after loot group is created, so let's do it after loot group
+
     // Группа врагов
     this.enemies = this.physics.add.group({
       classType: Enemy,
@@ -505,7 +492,13 @@ export class GameScene extends Phaser.Scene {
     });
 
     // Коллизии / пересечения
-    this.physics.add.overlap(
+    // Удаляем старый overlap, если он существует (защита от дублей при restart)
+    if (this.bulletsEnemiesOverlap) {
+      this.bulletsEnemiesOverlap.destroy();
+      this.bulletsEnemiesOverlap = null;
+    }
+    // Создаем overlap только один раз
+    this.bulletsEnemiesOverlap = this.physics.add.overlap(
       this.bullets,
       this.enemies,
       this
@@ -523,6 +516,84 @@ export class GameScene extends Phaser.Scene {
       this
     );
 
+    // Инициализируем EnemySystem (after enemies group and player are created)
+    this.enemySystem = new EnemySystem({
+      getIsActive: () => {
+        return this.isStarted && !this.gameOver && !this.isStageClear;
+      },
+      getScene: () => this,
+      getEnemiesGroup: () => this.enemies,
+      getPlayer: () => this.player,
+      getPlayerPos: () => ({ x: this.player.x, y: this.player.y }),
+      onEnemyHitPlayer: (enemy: Enemy) => {
+        // Delegate to existing handler logic
+        if (this.isStageClear) {
+          return;
+        }
+
+        if (!this.player.isAlive()) {
+          return;
+        }
+
+        // Если игрок неуязвим — просто игнорируем контакт
+        if (this.player.isInvulnerable()) {
+          return;
+        }
+
+        // 1) Наносим урон
+        this.player.takeDamage(1);
+        this.matchStatsSystem.onPlayerDamaged(1);
+        this.updateHealthText();
+
+        // 2) Запускаем i-frames
+        this.player.startInvulnerability(this.player.getIFramesMs());
+
+        // 3) Отбрасываем игрока
+        const strength = enemy.type === "tank" ? 320 : 260; // Чуть сильнее от танка
+        this.player.applyKnockback(enemy.x, enemy.y, strength, 140); // 140ms knockback
+
+        // Врага НЕ уничтожаем!
+
+        if (!this.player.isAlive()) {
+          this.handleGameOver();
+        }
+      },
+      onEnemyKilled: (type: EnemyType) => {
+        if (type === "runner" || type === "tank") {
+          this.matchStatsSystem.onEnemyKilled(type);
+        } else {
+          this.matchStatsSystem.onEnemyKilledTotalOnly();
+        }
+      },
+      isBurstActive: () => {
+        return this.stageSystem.getBurstState() === "burst";
+      },
+      getBurstSpeedMultiplier: () => {
+        return BURST_SPEED_BOOST;
+      },
+      isFreezeActive: () => {
+        return this.buffSystem.isActive("freeze");
+      },
+      applyFreezeToEnemy: (enemy: Enemy) => {
+        enemy.setFrozen(true);
+      },
+      getStageSpeedMultiplier: (stage: number) => {
+        return this.getStageSpeedMultiplier(stage);
+      },
+      getCurrentPhase: () => {
+        return this.currentPhase;
+      },
+      getPhaseSettings: (phase: number) => {
+        return this.getPhaseSettings(phase);
+      },
+      getStage: () => {
+        return this.stageSystem.getStage();
+      },
+      getEnemySpeedMultiplier: () => {
+        return this.enemySpeedMultiplier;
+      },
+    });
+
     this.loot = this.physics.add.group({
       classType: LootPickup,
       runChildUpdate: false,
@@ -536,6 +607,33 @@ export class GameScene extends Phaser.Scene {
       undefined,
       this
     );
+
+    // Инициализируем LootDropSystem (after loot group is created)
+    this.lootDropSystem = new LootDropSystem({
+      getIsActive: () => {
+        return this.isStarted && !this.gameOver && !this.isStageClear;
+      },
+      getTimeNow: () => this.time.now,
+      getPlayerPos: () => ({ x: this.player.x, y: this.player.y }),
+      getScene: () => this,
+      getLootGroup: () => this.loot,
+      isBuffActive: (type: "rapid" | "double" | "freeze") => {
+        return this.buffSystem.isActive(type);
+      },
+      isWeaponDropAllowed: () => {
+        // Check if weapon drop is allowed (same logic as before)
+        return !this.hasLootOfType("weapon-drop");
+      },
+      onBuffPicked: (type: "rapid" | "double" | "freeze") => {
+        this.buffSystem.startBuff(type);
+      },
+      onWeaponDropPicked: () => {
+        this.onWeaponDropPicked();
+      },
+      log: (msg: string) => {
+        console.log(msg);
+      },
+    });
 
     // UI: score и здоровье (score managed by MatchStatsSystem)
     this.score = 0;
@@ -713,11 +811,10 @@ export class GameScene extends Phaser.Scene {
     this.updateBuffHud(time);
 
     // Clean up inactive buff loot from tracking
-    this.activeBuffLoot.forEach((loot) => {
-      if (!loot || !loot.active) {
-        this.activeBuffLoot.delete(loot);
-      }
-    });
+    // Clean up expired buff loot items (handled by LootDropSystem)
+    if (this.lootDropSystem) {
+      this.lootDropSystem.cleanupExpiredBuffLoot();
+    }
 
     if (this.player && !this.isStageClear) {
       this.player.update();
@@ -739,69 +836,7 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  // Спавн врага по краям экрана (вызывается из SpawnSystem)
-  private spawnEnemyByType(chosenType: SpawnEnemyType): void {
-    if (this.gameOver || !this.player.isAlive()) {
-      return;
-    }
-
-    const settings = this.getPhaseSettings(this.currentPhase);
-
-    // Проверка tankCap для фазы 1 (только runner)
-    if (settings.tankCap === 0 && chosenType !== "runner") {
-      chosenType = "runner";
-    }
-
-    // Спавн
-    const { width, height } = this.scale;
-    const side = Phaser.Math.Between(0, 3);
-    let x = 0;
-    let y = 0;
-
-    switch (side) {
-      case 0: // top
-        x = Phaser.Math.Between(0, width);
-        y = -20;
-        break;
-      case 1: // bottom
-        x = Phaser.Math.Between(0, width);
-        y = height + 20;
-        break;
-      case 2: // left
-        x = -20;
-        y = Phaser.Math.Between(0, height);
-        break;
-      case 3: // right
-        x = width + 20;
-        y = Phaser.Math.Between(0, height);
-        break;
-    }
-
-    const enemy = new Enemy(
-      this,
-      x,
-      y,
-      this.player,
-      chosenType,
-      this.currentPhase,
-      this.enemies,
-      this.stageSystem.getStage()
-    );
-    this.enemies.add(enemy);
-
-    // Применяем stage speed multiplier
-    const stageSpeedMult = this.getStageSpeedMultiplier(
-      this.stageSystem.getStage()
-    );
-    const burstMult =
-      this.stageSystem.getBurstState() === "burst" ? BURST_SPEED_BOOST : 1.0;
-    enemy.setSpeedMultiplier(
-      stageSpeedMult * burstMult * this.enemySpeedMultiplier
-    );
-
-    // Если FREEZE активен - замораживаем нового врага
-    this.buffSystem.onEnemySpawned(enemy);
-  }
+  // spawnEnemyByType() moved to EnemySystem.spawn()
 
   // TODO: Remove after SpawnSystem integration complete
   // @deprecated Use spawnEnemyByType instead
@@ -845,18 +880,21 @@ export class GameScene extends Phaser.Scene {
     }
 
     // Guard 4: защита от повторного попадания в того же врага (для pierce) - используем стабильный ID
+    // Это критически важно: проверяем ДО любых других операций
     if (bullet.hasHitEnemy(enemy.id)) {
-      return;
+      return; // Уже обработано - игнорируем дубль
     }
 
     // Guard 5: помечаем врага как обработанного СРАЗУ (до любых других операций) - используем стабильный ID
-    // Это защищает от двойного overlap в одном кадре
+    // Это защищает от двойного overlap в одном кадре или при повторных вызовах
+    // ДОЛЖНО быть вызвано ДО onProjectileHit(), чтобы защита работала
     bullet.markEnemyHit(enemy.id);
 
     // Визуальный фидбек до уничтожения пули
     enemy.applyHitFeedback(bullet.x, bullet.y, this.time.now);
 
     // Статистика: попадание (каждое попадание пули в врага = +1)
+    // Вызывается ТОЛЬКО после успешного guard и markEnemyHit
     this.matchStatsSystem.onProjectileHit();
 
     // Наносим урон (урон игрока, без бонуса оружия)
@@ -901,9 +939,9 @@ export class GameScene extends Phaser.Scene {
       this.addXP(1);
       this.maybeDropLoot(enemy.x, enemy.y);
       // Weapon-drop spawn with constraints
-      this.maybeSpawnWeaponDrop(enemy.x, enemy.y);
+      this.lootDropSystem.maybeSpawnWeaponLoot(enemy.x, enemy.y);
       // Buff loot spawn
-      this.maybeSpawnBuffLoot(enemy.x, enemy.y);
+      this.lootDropSystem.maybeSpawnBuffLoot(enemy.x, enemy.y);
     }
   }
 
@@ -1013,22 +1051,10 @@ export class GameScene extends Phaser.Scene {
 
   private applyStageSpeedToEnemies(): void {
     // Применяем stage speed multiplier ко всем активным врагам
-    const mult = this.getStageSpeedMultiplier(this.stageSystem.getStage());
-    const children = this.enemies.getChildren();
-    for (let i = 0; i < children.length; i++) {
-      const enemy = children[i] as Enemy;
-      if (enemy && enemy.active) {
-        const isDying = (enemy as any).isDying;
-        if (!isDying) {
-          // Если сейчас burst, учитываем burst multiplier
-          const finalMult =
-            this.stageSystem.getBurstState() === "burst"
-              ? mult * BURST_SPEED_BOOST
-              : mult;
-          enemy.setSpeedMultiplier(finalMult);
-        }
-      }
-    }
+    // Stage multiplier is applied in EnemySystem.applySpeedMultiplier via getStageSpeedMultiplier callback
+    const burstMult =
+      this.stageSystem.getBurstState() === "burst" ? BURST_SPEED_BOOST : 1.0;
+    this.enemySystem.applySpeedMultiplier(burstMult);
   }
 
   // @ts-ignore - Method kept for potential future use
@@ -1049,16 +1075,7 @@ export class GameScene extends Phaser.Scene {
     return 3;
   }
 
-  private getAliveTanksCount(): number {
-    let count = 0;
-    this.enemies.getChildren().forEach((obj) => {
-      const enemy = obj as Enemy;
-      if (enemy.active && enemy.type === "tank") {
-        count++;
-      }
-    });
-    return count;
-  }
+  // getAliveTanksCount() moved to EnemySystem.getTankAliveCount()
 
   private getXPToNextLevel(level: number): number {
     // Линейная формула: 6 + (level - 1) * 2
@@ -1195,110 +1212,7 @@ export class GameScene extends Phaser.Scene {
     });
   }
 
-  private maybeSpawnWeaponDrop(x: number, y: number): void {
-    const now = this.time.now;
-
-    // Проверка cooldown
-    if (now - this.lastWeaponDropTime < WEAPON_DROP_COOLDOWN_MS) {
-      return;
-    }
-
-    // Проверка: уже есть активный weapon-drop на карте
-    if (this.hasLootOfType("weapon-drop")) {
-      return;
-    }
-
-    // Базовый шанс выпадения
-    if (Math.random() >= WEAPON_DROP_BASE_CHANCE) {
-      return;
-    }
-
-    // Спавним weapon-drop (also has TTL via LootPickup)
-    const weaponLoot = new LootPickup(this, x, y, "weapon-drop");
-    this.loot.add(weaponLoot);
-    this.lastWeaponDropTime = now;
-
-    // Log weapon drop with TTL
-    const ttlMs = Phaser.Math.Between(8000, 12000);
-    console.log(`[LOOT] weapon-drop dropped: ttl=${ttlMs}ms`);
-  }
-
-  private maybeSpawnBuffLoot(x: number, y: number): void {
-    const now = this.time.now;
-
-    // 1) Roll for drop chance (if chance fails, don't log anything)
-    const dropRoll = Math.random();
-    if (dropRoll >= BUFF_DROP_CHANCE) {
-      return; // No drop attempt, no log
-    }
-
-    // 2) Check cooldown (if on cooldown, count as skip for throttled logs)
-    if (now - this.lastBuffDropTime < BUFF_DROP_COOLDOWN_MS) {
-      // Throttle cooldown logs: log at most once per 3 seconds, or every 10th skip
-      this.cooldownLogSkipCount++;
-      const timeSinceLastLog = now - this.lastCooldownLogTime;
-      if (timeSinceLastLog >= 3000 || this.cooldownLogSkipCount >= 10) {
-        console.log(
-          `[LOOT] buff drop skipped (cooldown) x${this.cooldownLogSkipCount}`
-        );
-        this.lastCooldownLogTime = now;
-        this.cooldownLogSkipCount = 0;
-      }
-      return;
-    }
-
-    // 3) Limit active buff loot items
-    const activeBuffLootCount = Array.from(this.activeBuffLoot).filter(
-      (loot) => loot && loot.active
-    ).length;
-    if (activeBuffLootCount >= BUFF_MAX_ON_MAP) {
-      console.log(`[LOOT] buff drop skipped (limit)`);
-      return;
-    }
-
-    // 4) Roll for buff type using weights (freeze: 45%, rapid: 35%, double: 20%)
-    const typeRoll = Math.random();
-    let buffType: LootType | null = null;
-
-    if (typeRoll < BUFF_FREEZE_WEIGHT) {
-      buffType = "buff-freeze";
-    } else if (typeRoll < BUFF_FREEZE_WEIGHT + BUFF_RAPID_WEIGHT) {
-      buffType = "buff-rapid";
-    } else if (
-      typeRoll <
-      BUFF_FREEZE_WEIGHT + BUFF_RAPID_WEIGHT + BUFF_DOUBLE_WEIGHT
-    ) {
-      buffType = "buff-double";
-    } else {
-      // Fallback (shouldn't happen if weights sum to 1.0)
-      buffType = "buff-freeze";
-    }
-
-    // 5) Do not drop a buff if that buff is currently active
-    const buffKey = buffType.replace("buff-", "") as
-      | "rapid"
-      | "double"
-      | "freeze";
-    if (this.buffSystem.isActive(buffKey)) {
-      console.log(`[LOOT] buff drop skipped (active: ${buffKey})`);
-      return;
-    }
-
-    // 6) Spawn buff loot
-    const ttlMs = Phaser.Math.Between(8000, 12000);
-    const buffLoot = new LootPickup(this, x, y, buffType);
-    this.loot.add(buffLoot);
-    this.activeBuffLoot.add(buffLoot);
-
-    // Reset cooldown log counter on successful spawn
-    this.cooldownLogSkipCount = 0;
-
-    // Log spawn with TTL
-    console.log(`[LOOT] buff dropped: ${buffType} ttl=${ttlMs}ms`);
-
-    // Update cooldown
-    this.lastBuffDropTime = now;
-  }
+  // maybeSpawnWeaponDrop() and maybeSpawnBuffLoot() moved to LootDropSystem
 
   private handlePlayerPickupLoot(
     _playerObj:
@@ -1325,28 +1239,12 @@ export class GameScene extends Phaser.Scene {
         this.matchStatsSystem.onPlayerSpeedChanged(1);
         break;
       case "weapon-drop":
-        console.log("[LOOT] weapon-drop picked");
-        this.lastWeaponDropTime = this.time.now; // Обновляем cooldown при подборе
-        this.onWeaponDropPicked();
-        break;
       case "buff-rapid":
-        console.log(`[LOOT] buff picked: buff-rapid`);
-        this.buffSystem.startBuff("rapid");
-        break;
       case "buff-double":
-        console.log(`[LOOT] buff picked: buff-double`);
-        this.buffSystem.startBuff("double");
-        break;
-      // PIERCE removed from loot - only available via Stage Clear perk
       case "buff-freeze":
-        console.log(`[LOOT] buff picked: buff-freeze`);
-        this.buffSystem.startBuff("freeze");
+        // Handle buff and weapon-drop pickups through LootDropSystem
+        this.lootDropSystem.onPickup(loot);
         break;
-    }
-
-    // Remove from tracking if it's a buff loot or weapon-drop
-    if (loot.lootType.startsWith("buff-") || loot.lootType === "weapon-drop") {
-      this.activeBuffLoot.delete(loot);
     }
 
     loot.destroy();
@@ -1455,13 +1353,7 @@ export class GameScene extends Phaser.Scene {
     this.gameOver = true;
     this.overlaySystem.open("gameover");
 
-    // Clear buff loot tracking on game over
-    this.activeBuffLoot.forEach((loot) => {
-      if (loot && loot.active) {
-        loot.destroy();
-      }
-    });
-    this.activeBuffLoot.clear();
+    // Clear buff loot tracking on game over (handled by LootDropSystem.reset())
 
     // Печатаем статистику при Game Over
     this.stageResultSystem.onMatchEnd(this.time.now);
@@ -1589,14 +1481,10 @@ export class GameScene extends Phaser.Scene {
       this.stageSystem.reset(this.time.now);
     }
 
-    // Clear buff loot tracking and destroy all buff loot items
-    this.activeBuffLoot.forEach((loot) => {
-      if (loot && loot.active) {
-        loot.destroy();
-      }
-    });
-    this.activeBuffLoot.clear();
-    this.lastBuffDropTime = 0;
+    // Reset loot drop system
+    if (this.lootDropSystem) {
+      this.lootDropSystem.reset();
+    }
 
     // Reset match stats
     if (this.matchStatsSystem) {
@@ -1654,14 +1542,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private onStageClear(): void {
-    // Clear buff loot tracking on stage clear
-    this.activeBuffLoot.forEach((loot) => {
-      if (loot && loot.active) {
-        loot.destroy();
-      }
-    });
-    this.activeBuffLoot.clear();
-    this.lastBuffDropTime = 0;
+    // Clear buff loot tracking on stage clear (handled by LootDropSystem)
     if (this.gameOver || !this.isStarted || this.isStageClear) {
       return;
     }
@@ -1739,7 +1620,7 @@ export class GameScene extends Phaser.Scene {
       .setDepth(30001);
 
     // Получаем 3 перка для выбора
-    const perks = this.perkSystem.getAvailablePerks();
+    const perks = this.perkSystem.getRandomPick(3);
 
     // Адаптивный layout: вертикально на узких экранах, горизонтально на широких
     const isNarrow = width < 900;
@@ -1824,7 +1705,7 @@ export class GameScene extends Phaser.Scene {
           }
           // Логируем выбор перка
           console.log(`[PERK] picked ${perk.title}`);
-          perk.apply(); // This calls PerkSystem.applyPerk() internally
+          this.perkSystem.apply(perk.id);
           // Переходим к следующей стадии
           this.continueToNextStage();
         }
@@ -1843,7 +1724,7 @@ export class GameScene extends Phaser.Scene {
     this.stageClearOverlay.setScrollFactor(0);
   }
 
-  // getStageClearPerks() removed - now handled by PerkSystem.getAvailablePerks()
+  // getStageClearPerks() removed - now handled by PerkSystem.getRandomPick()
 
   private hideStageClearOverlay(): void {
     if (this.stageClearOverlay) {
@@ -1887,21 +1768,5 @@ export class GameScene extends Phaser.Scene {
   }
 
   // Burst cycle methods removed - now handled by StageSystem
-
-  private applyBurstSpeedToEnemies(apply: boolean): void {
-    const children = this.enemies.getChildren();
-    const stageMult = this.getStageSpeedMultiplier(this.stageSystem.getStage());
-    for (let i = 0; i < children.length; i++) {
-      const enemy = children[i] as Enemy;
-      if (enemy && enemy.active) {
-        // Проверяем isDying через приватное поле (через any для доступа)
-        const isDying = (enemy as any).isDying;
-        if (!isDying) {
-          const baseMult = stageMult;
-          const finalMult = apply ? baseMult * BURST_SPEED_BOOST : baseMult;
-          enemy.setSpeedMultiplier(finalMult);
-        }
-      }
-    }
-  }
+  // applyBurstSpeedToEnemies() moved to EnemySystem.applySpeedMultiplier()
 }
