@@ -51,6 +51,9 @@ const MOVEMENT_CONFIGS: Record<EnemyType, Omit<EnemyMovementConfig, "orbitSign">
   },
 };
 
+// Global counter for enemy IDs
+let enemyIdCounter = 0;
+
 export class Enemy extends Phaser.Physics.Arcade.Sprite {
   private target: Player;
   private speed!: number; // Инициализируется в конструкторе
@@ -58,6 +61,7 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
   private speedMultiplier = 1.0; // Множитель скорости (для burst)
 
   public readonly type: EnemyType;
+  public readonly id: number; // Stable unique ID for hit tracking
   private maxHealth!: number; // Инициализируется в конструкторе
   private health!: number; // Инициализируется в конструкторе
   private baseMaxHealth = 1;
@@ -166,6 +170,9 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
     stage: number = 1
   ) {
     super(scene, x, y, "enemy");
+
+    // Assign stable unique ID
+    this.id = ++enemyIdCounter;
 
     this.target = target;
     this.type = type;

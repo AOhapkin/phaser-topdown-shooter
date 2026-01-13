@@ -5,7 +5,7 @@ export type LootType = "heal" | "speed" | "weapon-drop" | "buff-rapid" | "buff-d
 // Loot TTL constants
 const LOOT_TTL_MIN_MS = 8000;
 const LOOT_TTL_MAX_MS = 12000;
-const LOOT_BLINK_LAST_MS = 2000;
+const LOOT_BLINK_LAST_MS = 1500; // Blink starts 1.5 seconds before expiration
 const LOOT_BLINK_INTERVAL_MS = 120;
 
 export class LootPickup extends Phaser.Physics.Arcade.Sprite {
@@ -183,9 +183,11 @@ export class LootPickup extends Phaser.Physics.Arcade.Sprite {
 
     // TTL: уничтожение после истечения времени
     if (time >= this.expireTime) {
-      // Log despawn for buff loot
-      if (this.lootType.startsWith("buff-") || this.lootType === "weapon-drop") {
-        console.log(`[LOOT] despawned: ${this.lootType}`);
+      // Log expiration for buff loot
+      if (this.lootType.startsWith("buff-")) {
+        console.log(`[LOOT] buff expired: ${this.lootType}`);
+      } else if (this.lootType === "weapon-drop") {
+        console.log(`[LOOT] weapon-drop expired`);
       }
       this.destroy();
     }

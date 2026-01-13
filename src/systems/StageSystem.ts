@@ -1,7 +1,7 @@
 import Phaser from "phaser";
 
 // Stage system constants
-const STAGE_DURATION_SEC = 75;
+const STAGE_DURATION_SEC = 25;
 const BURST_INTERVAL_MIN_SEC = 12;
 const BURST_INTERVAL_MAX_SEC = 15;
 const BURST_DURATION_MIN_SEC = 4;
@@ -41,6 +41,8 @@ export class StageSystem {
     this.stageElapsedSec = 0;
     this.burstState = "idle";
     this.scheduleNextBurst(timeMs);
+    // Logging: StageSystem is the single source of truth for stage logs
+    console.log(`[STAGE] START stage=${this.currentStage} duration=${STAGE_DURATION_SEC}s`);
     this.callbacks.onStageStart(this.currentStage);
   }
 
@@ -54,6 +56,8 @@ export class StageSystem {
 
     // Проверяем завершение стадии
     if (this.stageElapsedSec >= STAGE_DURATION_SEC) {
+      // Logging: StageSystem is the single source of truth for stage logs
+      console.log(`[STAGE] END stage=${this.currentStage} survived=true`);
       this.callbacks.onStageEnd(this.currentStage, true);
       // StageSystem сам инкрементирует стадию
       this.currentStage++;
@@ -61,6 +65,8 @@ export class StageSystem {
       this.stageElapsedSec = 0;
       this.burstState = "idle";
       this.scheduleNextBurst(timeMs);
+      // Logging: StageSystem is the single source of truth for stage logs
+      console.log(`[STAGE] START stage=${this.currentStage} duration=${STAGE_DURATION_SEC}s`);
       this.callbacks.onStageStart(this.currentStage);
       return;
     }

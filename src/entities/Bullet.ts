@@ -3,7 +3,7 @@ import Phaser from 'phaser';
 export class Bullet extends Phaser.Physics.Arcade.Image {
   public speed = 500;
   public pierceLeft = 0; // Сколько врагов может пробить
-  private hitEnemies = new Set<Phaser.GameObjects.GameObject>(); // Враги, в которых уже попали
+  private hitEnemyIds = new Set<number>(); // IDs врагов, в которых уже попали (stable IDs, not references)
 
   constructor(scene: Phaser.Scene, x: number, y: number) {
     super(scene, x, y, 'bullet');
@@ -26,12 +26,12 @@ export class Bullet extends Phaser.Physics.Arcade.Image {
     });
   }
 
-  public hasHitEnemy(enemy: Phaser.GameObjects.GameObject): boolean {
-    return this.hitEnemies.has(enemy);
+  public hasHitEnemy(enemyId: number): boolean {
+    return this.hitEnemyIds.has(enemyId);
   }
 
-  public markEnemyHit(enemy: Phaser.GameObjects.GameObject): void {
-    this.hitEnemies.add(enemy);
+  public markEnemyHit(enemyId: number): void {
+    this.hitEnemyIds.add(enemyId);
   }
 }
 

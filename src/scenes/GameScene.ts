@@ -13,6 +13,7 @@ import {
 import { BuffSystem } from "../systems/BuffSystem";
 import { WeaponSystem } from "../systems/WeaponSystem";
 import { OverlaySystem } from "../systems/OverlaySystem";
+import { MatchStatsSystem } from "../systems/MatchStatsSystem";
 
 import playerSvg from "../assets/player.svg?url";
 import enemySvg from "../assets/enemy.svg?url";
@@ -65,47 +66,22 @@ const WEAPON_DROP_COOLDOWN_MS = 30000; // 30 seconds cooldown
 // const BUFF_FREEZE_DURATION_MS = 6000;
 // const BUFF_MAX_DURATION_MS = 20000;
 
-// Buff spawn chances (PIERCE removed - only available via Stage Clear perk)
-const BUFF_RAPID_CHANCE = 0.012; // 1.2%
-const BUFF_DOUBLE_CHANCE = 0.009; // 0.9%
-const BUFF_FREEZE_CHANCE = 0.006; // 0.6%
+// Buff drop parameters
+const BUFF_DROP_COOLDOWN_MS = 12000; // Global cooldown for buff drops (ms)
+const BUFF_DROP_CHANCE = 0.18; // Chance to attempt buff drop on event (e.g., enemy kill)
+const BUFF_MAX_ON_MAP = 1; // Maximum buff loot items on map simultaneously
 
-// Max active buff loot on map
-const MAX_ACTIVE_BUFF_LOOT = 2;
-
-// Global cooldown for buff drops (ms)
-const BUFF_DROP_COOLDOWN_MS = 12000;
+// Buff type weights (for selection when drop is attempted)
+// Total: 100% (freeze: 45%, rapid: 35%, double: 20%)
+const BUFF_FREEZE_WEIGHT = 0.45;
+const BUFF_RAPID_WEIGHT = 0.35;
+const BUFF_DOUBLE_WEIGHT = 0.2;
 
 // Buff types (moved to BuffSystem, keeping for compatibility)
 // TODO: Remove after full integration
 type BuffType = "rapid" | "double" | "pierce" | "freeze";
 
-type MatchStats = {
-  startedAtMs: number;
-  endedAtMs: number | null;
-
-  score: number;
-  level: number;
-  phase: number;
-
-  shotsFiredProjectiles: number; // количество созданных пуль/проектайлов
-  shotsHitProjectiles: number; // количество попаданий по врагам (каждое попадание = +1)
-  killsTotal: number;
-  killsRunner: number;
-  killsTank: number;
-
-  damageTaken: number;
-  healsPicked: number;
-  speedPicked: number;
-
-  weaponStart: string; // "PISTOL"
-  weaponCurrent: string; // "PISTOL"/"SHOTGUN"
-  weaponSwitches: number;
-
-  // Legacy fields for backward compatibility (deprecated)
-  shotsFired: number; // @deprecated Use shotsFiredProjectiles
-  shotsHit: number; // @deprecated Use shotsHitProjectiles
-};
+// MatchStats type removed - now handled by MatchStatsSystem
 
 const PHASES: PhaseSettings[] = [
   {
@@ -157,6 +133,7 @@ export class GameScene extends Phaser.Scene {
 
   private score = 0;
   private scoreText!: Phaser.GameObjects.Text;
+  private weaponSwitches = 0; // Track weapon switches for logging
   private healthText!: Phaser.GameObjects.Text;
 
   private level = 1;
@@ -209,8 +186,8 @@ export class GameScene extends Phaser.Scene {
   // Overlay system
   private overlaySystem!: OverlaySystem;
 
-  // Match stats
-  private stats!: MatchStats;
+  // Match stats system
+  private matchStatsSystem!: MatchStatsSystem;
   private debugLogs = false; // выключить шумные логи
 
   // Stage Clear perks
@@ -222,6 +199,8 @@ export class GameScene extends Phaser.Scene {
   // Buff loot tracking
   private lastBuffDropTime = 0; // Time when last buff loot was dropped
   private activeBuffLoot = new Set<LootPickup>(); // Track active buff loot items
+  private lastCooldownLogTime = 0; // Throttle cooldown logs (log at most once per second)
+  private cooldownLogSkipCount = 0; // Count skipped cooldown logs
 
   // Buff system moved to BuffSystem
   private buffHudText?: Phaser.GameObjects.Text;
@@ -306,6 +285,9 @@ export class GameScene extends Phaser.Scene {
 
     // Инициализируем OverlaySystem
     this.overlaySystem = new OverlaySystem();
+
+    // Инициализируем MatchStatsSystem
+    this.matchStatsSystem = new MatchStatsSystem();
 
     // Инициализируем статистику (weaponSystem будет инициализирован после)
     this.resetMatchStats();
@@ -440,19 +422,17 @@ export class GameScene extends Phaser.Scene {
         this.time.delayedCall(delayMs, callback);
       },
       onShotFired: (projectilesCount: number) => {
-        this.stats.shotsFiredProjectiles += projectilesCount;
-        // Legacy: keep shotsFired for backward compatibility
-        this.stats.shotsFired += projectilesCount;
+        this.matchStatsSystem.onShotFired(projectilesCount);
       },
     });
 
     // Инициализируем StageSystem
     this.stageSystem = new StageSystem(this, {
-      onStageStart: (stage: number) => {
-        console.log(`[STAGE] START stage=${stage}`);
+      onStageStart: (_stage: number) => {
+        // Logging handled in StageSystem, no duplicate here
       },
-      onStageEnd: (stage: number, survived: boolean) => {
-        console.log(`[STAGE] END stage=${stage} survived=${survived}`);
+      onStageEnd: (_stage: number, survived: boolean) => {
+        // Logging handled in StageSystem, no duplicate here
         this.endStage(survived);
         this.onStageClear();
       },
@@ -519,8 +499,9 @@ export class GameScene extends Phaser.Scene {
       this
     );
 
-    // UI: score и здоровье
+    // UI: score и здоровье (score managed by MatchStatsSystem)
     this.score = 0;
+    this.weaponSwitches = 0;
     this.scoreText = this.add.text(16, 16, "Score: 0", {
       fontSize: "18px",
       color: "#ffffff",
@@ -674,8 +655,7 @@ export class GameScene extends Phaser.Scene {
     const phase = this.getPhaseNumber(elapsed);
     if (phase !== this.currentPhase) {
       this.currentPhase = phase;
-      // Обновляем статистику
-      this.stats.phase = this.currentPhase;
+      // Phase tracking (used in printMatchSummary)
       // Обновляем таймер спавна при смене фазы
       this.spawnSystem.onParamsChanged(this.time.now);
       // Опционально: обновить debug текст
@@ -807,36 +787,54 @@ export class GameScene extends Phaser.Scene {
     const bullet = bulletObj as Bullet;
     const enemy = enemyObj as Enemy;
 
-    // Защита от повторного попадания в того же врага (для pierce)
-    if (bullet.hasHitEnemy(enemy)) {
+    // Guard 1: bullet must exist and be active
+    if (!bullet || !bullet.active) {
       return;
     }
 
-    // Помечаем врага как обработанного (до любых других операций)
-    bullet.markEnemyHit(enemy);
+    // Guard 2: bullet must have enabled body
+    if (!bullet.body) {
+      return;
+    }
+    const bulletBody = bullet.body as Phaser.Physics.Arcade.Body;
+    if (!bulletBody.enable) {
+      return;
+    }
+
+    // Guard 3: enemy must exist, be active and not dying
+    if (!enemy || !enemy.active || (enemy as any).isDying) {
+      return;
+    }
+
+    // Guard 4: защита от повторного попадания в того же врага (для pierce) - используем стабильный ID
+    if (bullet.hasHitEnemy(enemy.id)) {
+      return;
+    }
+
+    // Guard 5: помечаем врага как обработанного СРАЗУ (до любых других операций) - используем стабильный ID
+    // Это защищает от двойного overlap в одном кадре
+    bullet.markEnemyHit(enemy.id);
 
     // Визуальный фидбек до уничтожения пули
     enemy.applyHitFeedback(bullet.x, bullet.y, this.time.now);
 
     // Статистика: попадание (каждое попадание пули в врага = +1)
-    this.stats.shotsHitProjectiles++;
-    // Legacy: keep shotsHit for backward compatibility
-    this.stats.shotsHit++;
+    this.matchStatsSystem.onProjectileHit();
 
     // Наносим урон (урон игрока, без бонуса оружия)
     const totalDamage = this.player.getDamage();
     const killed = enemy.takeDamage(totalDamage);
 
     // Проверяем pierce: если пуля может пробить, уменьшаем счётчик и не уничтожаем
-    const bulletBody = bullet.body as Phaser.Physics.Arcade.Body | undefined;
     if (bullet.pierceLeft > 0) {
       bullet.pierceLeft--;
       // Пуля продолжает полёт и может попасть в другого врага
     } else {
-      // Пуля не может пробить - отключаем коллайдер и уничтожаем
-      if (bulletBody) {
-        bulletBody.enable = false;
-      }
+      // Пуля не может пробить - отключаем коллайдер и уничтожаем немедленно
+      // Делаем это СРАЗУ, чтобы предотвратить повторную обработку в том же кадре
+      bulletBody.enable = false;
+      bullet.setActive(false);
+      bullet.setVisible(false);
       bullet.destroy();
     }
 
@@ -849,15 +847,17 @@ export class GameScene extends Phaser.Scene {
 
       enemy.die(bullet.x, bullet.y);
 
-      // Статистика: убийство
-      this.stats.killsTotal++;
-      if (enemy.type === "runner") {
-        this.stats.killsRunner++;
-      } else if (enemy.type === "tank") {
-        this.stats.killsTank++;
+      // Статистика: убийство (score обновляется внутри MatchStatsSystem)
+      if (enemy.type === "runner" || enemy.type === "tank") {
+        this.matchStatsSystem.onEnemyKilled(enemy.type);
+      } else {
+        // fast/heavy count as total kills only
+        this.matchStatsSystem.onEnemyKilledTotalOnly();
       }
 
-      this.score += 1;
+      // Update score UI from MatchStatsSystem
+      const summary = this.matchStatsSystem.getSummary();
+      this.score = summary.score;
       this.scoreText.setText(`Score: ${this.score}`);
 
       this.addXP(1);
@@ -896,7 +896,7 @@ export class GameScene extends Phaser.Scene {
 
     // 1) Наносим урон
     player.takeDamage(1);
-    this.stats.damageTaken += 1;
+    this.matchStatsSystem.onPlayerDamaged(1);
     this.updateHealthText();
 
     // 2) Запускаем i-frames
@@ -993,6 +993,8 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  // @ts-ignore - Method kept for potential future use
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   private getStageRunnerHP(stage: number): number {
     // runner: 1 HP до стадии 4, затем 2 до стадии 7, затем 3
     if (stage >= 7) return 3;
@@ -1000,6 +1002,8 @@ export class GameScene extends Phaser.Scene {
     return 1;
   }
 
+  // @ts-ignore - Method kept for potential future use
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   private getStageTankHP(stage: number): number {
     // tank: 3 HP до стадии 4, затем 4 до стадии 7, затем 5
     if (stage >= 7) return 5;
@@ -1038,7 +1042,7 @@ export class GameScene extends Phaser.Scene {
       this.level += 1;
 
       // Обновляем статистику
-      this.stats.level = this.level;
+      // Level tracking (used in printMatchSummary)
 
       // Level up без показа overlay - прокачка только через перки между стадиями
 
@@ -1096,10 +1100,7 @@ export class GameScene extends Phaser.Scene {
     }
 
     // Статистика: смена оружия
-    this.stats.weaponSwitches++;
-    this.stats.weaponCurrent = this.weaponSystem
-      .getCurrentWeapon()
-      .getStats().name;
+    this.weaponSwitches++;
 
     // Заменяем оружие через WeaponSystem
     this.weaponSystem.switchWeapon(weaponId);
@@ -1187,41 +1188,55 @@ export class GameScene extends Phaser.Scene {
   private maybeSpawnBuffLoot(x: number, y: number): void {
     const now = this.time.now;
 
-    // 1) Global cooldown check
+    // 1) Roll for drop chance (if chance fails, don't log anything)
+    const dropRoll = Math.random();
+    if (dropRoll >= BUFF_DROP_CHANCE) {
+      return; // No drop attempt, no log
+    }
+
+    // 2) Check cooldown (if on cooldown, count as skip for throttled logs)
     if (now - this.lastBuffDropTime < BUFF_DROP_COOLDOWN_MS) {
-      console.log(`[LOOT] buff drop skipped (cooldown)`);
+      // Throttle cooldown logs: log at most once per 3 seconds, or every 10th skip
+      this.cooldownLogSkipCount++;
+      const timeSinceLastLog = now - this.lastCooldownLogTime;
+      if (timeSinceLastLog >= 3000 || this.cooldownLogSkipCount >= 10) {
+        console.log(
+          `[LOOT] buff drop skipped (cooldown) x${this.cooldownLogSkipCount}`
+        );
+        this.lastCooldownLogTime = now;
+        this.cooldownLogSkipCount = 0;
+      }
       return;
     }
 
-    // 2) Limit active buff loot items (max 2)
+    // 3) Limit active buff loot items
     const activeBuffLootCount = Array.from(this.activeBuffLoot).filter(
       (loot) => loot && loot.active
     ).length;
-    if (activeBuffLootCount >= MAX_ACTIVE_BUFF_LOOT) {
+    if (activeBuffLootCount >= BUFF_MAX_ON_MAP) {
       console.log(`[LOOT] buff drop skipped (limit)`);
       return;
     }
 
-    // 3) Roll for buff type (PIERCE removed - only available via Stage Clear)
-    const roll = Math.random();
+    // 4) Roll for buff type using weights (freeze: 45%, rapid: 35%, double: 20%)
+    const typeRoll = Math.random();
     let buffType: LootType | null = null;
 
-    // Total chance: RAPID + DOUBLE + FREEZE (PIERCE removed)
-    const totalChance =
-      BUFF_RAPID_CHANCE + BUFF_DOUBLE_CHANCE + BUFF_FREEZE_CHANCE;
-
-    if (roll < BUFF_RAPID_CHANCE) {
-      buffType = "buff-rapid";
-    } else if (roll < BUFF_RAPID_CHANCE + BUFF_DOUBLE_CHANCE) {
-      buffType = "buff-double";
-    } else if (roll < totalChance) {
+    if (typeRoll < BUFF_FREEZE_WEIGHT) {
       buffType = "buff-freeze";
+    } else if (typeRoll < BUFF_FREEZE_WEIGHT + BUFF_RAPID_WEIGHT) {
+      buffType = "buff-rapid";
+    } else if (
+      typeRoll <
+      BUFF_FREEZE_WEIGHT + BUFF_RAPID_WEIGHT + BUFF_DOUBLE_WEIGHT
+    ) {
+      buffType = "buff-double";
     } else {
-      // No buff drop
-      return;
+      // Fallback (shouldn't happen if weights sum to 1.0)
+      buffType = "buff-freeze";
     }
 
-    // 4) Do not drop a buff if that buff is currently active
+    // 5) Do not drop a buff if that buff is currently active
     const buffKey = buffType.replace("buff-", "") as
       | "rapid"
       | "double"
@@ -1231,13 +1246,16 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    // 5) Spawn buff loot
+    // 6) Spawn buff loot
+    const ttlMs = Phaser.Math.Between(8000, 12000);
     const buffLoot = new LootPickup(this, x, y, buffType);
     this.loot.add(buffLoot);
     this.activeBuffLoot.add(buffLoot);
 
-    // Calculate TTL for logging
-    const ttlMs = Phaser.Math.Between(8000, 12000);
+    // Reset cooldown log counter on successful spawn
+    this.cooldownLogSkipCount = 0;
+
+    // Log spawn with TTL
     console.log(`[LOOT] buff dropped: ${buffType} ttl=${ttlMs}ms`);
 
     // Update cooldown
@@ -1261,12 +1279,12 @@ export class GameScene extends Phaser.Scene {
     switch (loot.lootType) {
       case "heal":
         this.player.applyHeal(1);
-        this.stats.healsPicked++;
+        this.matchStatsSystem.onPlayerHealed(1);
         this.updateHealthText();
         break;
       case "speed":
         this.player.applySpeedBoost(1.5, 4000); // x1.5 на 4 секунды
-        this.stats.speedPicked++;
+        this.matchStatsSystem.onPlayerSpeedChanged(1);
         break;
       case "weapon-drop":
         console.log("[LOOT] weapon-drop picked");
@@ -1274,13 +1292,16 @@ export class GameScene extends Phaser.Scene {
         this.onWeaponDropPicked();
         break;
       case "buff-rapid":
+        console.log(`[LOOT] buff picked: buff-rapid`);
         this.buffSystem.startBuff("rapid");
         break;
       case "buff-double":
+        console.log(`[LOOT] buff picked: buff-double`);
         this.buffSystem.startBuff("double");
         break;
       // PIERCE removed from loot - only available via Stage Clear perk
       case "buff-freeze":
+        console.log(`[LOOT] buff picked: buff-freeze`);
         this.buffSystem.startBuff("freeze");
         break;
     }
@@ -1449,13 +1470,7 @@ export class GameScene extends Phaser.Scene {
     this.stageSystem.start(this.time.now);
 
     // Обновляем статистику при старте
-    this.stats.startedAtMs = this.time.now;
-    this.stats.weaponStart = this.weaponSystem
-      .getCurrentWeapon()
-      .getStats().name;
-    this.stats.weaponCurrent = this.weaponSystem
-      .getCurrentWeapon()
-      .getStats().name;
+    this.matchStatsSystem.reset(this.time.now);
 
     // Block shooting for short time after start
     this.weaponSystem.setSuppressShootingUntil(this.time.now + 200);
@@ -1543,73 +1558,42 @@ export class GameScene extends Phaser.Scene {
     });
     this.activeBuffLoot.clear();
     this.lastBuffDropTime = 0;
-    this.stats = {
-      startedAtMs: this.time.now,
-      endedAtMs: null,
-      score: 0,
-      level: 1,
-      phase: 1,
-      shotsFiredProjectiles: 0,
-      shotsHitProjectiles: 0,
-      shotsFired: 0, // Legacy
-      shotsHit: 0, // Legacy
-      killsTotal: 0,
-      killsRunner: 0,
-      killsTank: 0,
-      damageTaken: 0,
-      healsPicked: 0,
-      speedPicked: 0,
-      weaponStart:
-        this.weaponSystem?.getCurrentWeapon()?.getStats()?.name ?? "PISTOL",
-      weaponCurrent:
-        this.weaponSystem?.getCurrentWeapon()?.getStats()?.name ?? "PISTOL",
-      weaponSwitches: 0,
-    };
+
+    // Reset match stats
+    if (this.matchStatsSystem) {
+      this.matchStatsSystem.reset(this.time.now);
+    }
   }
 
   private printMatchSummary(reason: "GAME_OVER" | "RESTART" | "MANUAL"): void {
-    // Обновляем текущие значения
-    this.stats.score = this.score;
-    this.stats.level = this.level;
-    this.stats.phase = this.currentPhase;
-    this.stats.weaponCurrent =
+    // End match and get summary
+    this.matchStatsSystem.endMatch(this.time.now);
+    const summary = this.matchStatsSystem.getSummary();
+
+    // Get current game state values
+    const weaponStart =
+      this.weaponSystem?.getCurrentWeapon()?.getStats()?.name ?? "PISTOL";
+    const weaponCurrent =
       this.weaponSystem?.getCurrentWeapon()?.getStats()?.name ?? "UNKNOWN";
 
-    // Фиксируем время окончания, если ещё не зафиксировано
-    if (this.stats.endedAtMs === null) {
-      this.stats.endedAtMs = this.time.now;
-    }
-
-    const durationSec = (this.stats.endedAtMs - this.stats.startedAtMs) / 1000;
-
-    // Calculate accuracy from projectiles (guaranteed <= 100%)
-    const accuracy =
-      this.stats.shotsFiredProjectiles > 0
-        ? (this.stats.shotsHitProjectiles / this.stats.shotsFiredProjectiles) *
-          100
-        : 0;
-
-    // Ensure accuracy is never > 100% (safety check)
-    const clampedAccuracy = Math.min(100.0, Math.max(0, accuracy));
-
     console.groupCollapsed(
-      `[MATCH] ${reason} | ${durationSec.toFixed(1)}s | score=${
-        this.stats.score
-      } lvl=${this.stats.level} phase=${this.stats.phase}`
+      `[MATCH] ${reason} | ${summary.durationSec.toFixed(1)}s | score=${
+        summary.score
+      } lvl=${this.level} phase=${this.currentPhase}`
     );
     console.log(
-      `Weapon: ${this.stats.weaponStart} -> ${this.stats.weaponCurrent} (switches: ${this.stats.weaponSwitches})`
+      `Weapon: ${weaponStart} -> ${weaponCurrent} (switches: ${this.weaponSwitches})`
     );
     console.log(
-      `Shots: proj fired=${this.stats.shotsFiredProjectiles}, hit=${
-        this.stats.shotsHitProjectiles
-      }, acc=${clampedAccuracy.toFixed(1)}%`
+      `Shots: proj fired=${summary.shotsFiredProjectiles}, hit=${
+        summary.shotsHitProjectiles
+      }, acc=${summary.accuracy.toFixed(1)}%`
     );
     console.log(
-      `Kills: total=${this.stats.killsTotal} (runner=${this.stats.killsRunner}, tank=${this.stats.killsTank})`
+      `Kills: total=${summary.killsTotal} (runner=${summary.killsRunner}, tank=${summary.killsTank})`
     );
     console.log(
-      `Player: damageTaken=${this.stats.damageTaken}, heals=${this.stats.healsPicked}, speed=${this.stats.speedPicked}`
+      `Player: damageTaken=${summary.damageTaken}, heals=${summary.heals}, speed=${summary.speed}`
     );
     console.groupEnd();
   }
@@ -1620,10 +1604,9 @@ export class GameScene extends Phaser.Scene {
 
   // updateStageSystem removed - now handled by stageSystem.update()
 
-  private endStage(survived: boolean): void {
-    console.log(
-      `[STAGE] END stage=${this.stageSystem.getStage()} survived=${survived}`
-    );
+  private endStage(_survived: boolean): void {
+    // Logging handled in StageSystem.onStageEnd callback
+    // No duplicate log here
   }
 
   private onStageClear(): void {
@@ -1795,6 +1778,8 @@ export class GameScene extends Phaser.Scene {
           if (event?.stopPropagation) {
             event.stopPropagation();
           }
+          // Логируем выбор перка
+          console.log(`[PERK] picked ${perk.title}`);
           perk.apply();
           // Переходим к следующей стадии
           this.continueToNextStage();
@@ -1907,25 +1892,8 @@ export class GameScene extends Phaser.Scene {
     // Запускаем спавн
     this.spawnSystem.start(now);
 
-    // Логируем параметры стадии
-    const settings = this.getPhaseSettings(this.currentPhase);
-    const spawnDelay = settings.spawnDelayMs;
-    const runnerHP = this.getStageRunnerHP(this.stageSystem.getStage());
-    const tankHP = this.getStageTankHP(this.stageSystem.getStage());
-    const speedMult = this.getStageSpeedMultiplier(this.stageSystem.getStage());
-    const tankWeight = Math.round(
-      settings.weights.tank *
-        this.getStageTankWeightMultiplier(this.stageSystem.getStage())
-    );
-    console.log(
-      `[STAGE] START stage=${this.stageSystem.getStage()} (spawnDelay=${spawnDelay.toFixed(
-        0
-      )}ms, weights=runner:${
-        settings.weights.runner
-      }/tank:${tankWeight}, hpRunner=${runnerHP}, hpTank=${tankHP}, speedMul=${speedMult.toFixed(
-        2
-      )})`
-    );
+    // Logging handled in StageSystem.onStageStart callback
+    // No duplicate log here
   }
 
   // Burst cycle methods removed - now handled by StageSystem
