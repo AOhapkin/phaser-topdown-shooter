@@ -1,13 +1,17 @@
 import Phaser from "phaser";
 import { Player } from "../entities/Player";
 import { Bullet } from "../entities/Bullet";
-import { Enemy, EnemyType } from "../entities/Enemy";
+import { Enemy } from "../entities/Enemy";
 import { LootPickup, LootType } from "../entities/LootPickup";
 import { Weapon } from "../weapons/types";
 import { BasicGun } from "../weapons/BasicGun";
 import { Shotgun } from "../weapons/Shotgun";
 import { LevelUpOption } from "../ui/LevelUpOverlay";
 import { StageSystem } from "../systems/StageSystem";
+import {
+  SpawnSystem,
+  EnemyType as SpawnEnemyType,
+} from "../systems/SpawnSystem";
 
 import playerSvg from "../assets/player.svg?url";
 import enemySvg from "../assets/enemy.svg?url";
@@ -172,12 +176,9 @@ export class GameScene extends Phaser.Scene {
   private isStageClear = false;
   private debugEnabled = false;
 
-  // Stable spawn scheduler
-  private spawnTickEvent?: Phaser.Time.TimerEvent;
-  private nextSpawnAtMs = 0;
-  private currentBaseSpawnDelayMs = 1000; // from phase settings
-  private spawnDelayMultiplier = 1.0; // burst/recovery modifier
-  private lastSpawnDebugLog = 0; // for temporary debug logging
+  // Spawn scheduler moved to SpawnSystem
+  // TODO: Remove lastSpawnDebugLog if not needed
+  // private lastSpawnDebugLog = 0;
   private restartKey!: Phaser.Input.Keyboard.Key;
   private continueKey!: Phaser.Input.Keyboard.Key;
   private loot!: Phaser.Physics.Arcade.Group;
@@ -191,6 +192,9 @@ export class GameScene extends Phaser.Scene {
 
   // Stage system (moved to StageSystem)
   private stageSystem!: StageSystem;
+
+  // Spawn system (moved to SpawnSystem)
+  private spawnSystem!: SpawnSystem;
 
   // Match stats
   private stats!: MatchStats;
@@ -232,11 +236,7 @@ export class GameScene extends Phaser.Scene {
     this.gameOver = false;
     this.isStarted = false;
 
-    // Сбрасываем параметры сложности
-    this.currentBaseSpawnDelayMs = 1000;
-    this.spawnDelayMultiplier = 1.0;
-    this.nextSpawnAtMs = 0;
-    this.lastSpawnDebugLog = 0;
+    // Spawn system parameters are reset via spawnSystem.reset()
 
     // Сбрасываем фазы
     this.runStartTime = 0;
@@ -299,6 +299,48 @@ export class GameScene extends Phaser.Scene {
     // Инициализируем статистику после создания оружия
     this.resetMatchStats();
 
+    // Инициализируем SpawnSystem
+    this.spawnSystem = new SpawnSystem(
+      this,
+      {
+        getIsActive: () => {
+          return this.isStarted && !this.gameOver && !this.isStageClear;
+        },
+        getCurrentPhase: () => this.currentPhase,
+        getPhaseSettings: (phase: number) => this.getPhaseSettings(phase),
+        getBurstState: () => this.stageSystem.getBurstState(),
+        getSpawnDelayMultiplier: () => this.getSpawnMultiplier(),
+        getEffectiveWeights: (settings, burstState) => {
+          let runnerWeight = settings.weights.runner;
+          let tankWeight = settings.weights.tank;
+
+          // Применяем stage modifier для веса танков
+          tankWeight = Math.round(
+            tankWeight *
+              this.getStageTankWeightMultiplier(this.stageSystem.getStage())
+          );
+
+          // Во время burst увеличиваем вес runner
+          if (burstState === "burst") {
+            runnerWeight = Math.round(runnerWeight * BURST_RUNNER_WEIGHT_BOOST);
+          }
+
+          return { runner: runnerWeight, tank: tankWeight };
+        },
+        getAliveEnemiesCount: () => this.enemies.countActive(true),
+        getAliveTanksCount: () => this.getAliveTanksCount(),
+        spawnEnemy: (chosenType: SpawnEnemyType) => {
+          this.spawnEnemyByType(chosenType);
+        },
+        logSpawnDebug: (msg: string) => {
+          if (this.debugLogs) {
+            console.log(msg);
+          }
+        },
+      },
+      MIN_SPAWN_DELAY_MS
+    );
+
     // Инициализируем StageSystem
     this.stageSystem = new StageSystem(this, {
       onStageStart: (stage: number) => {
@@ -315,13 +357,8 @@ export class GameScene extends Phaser.Scene {
             1
           )}s duration=${durationSec.toFixed(1)}s`
         );
-        // Обновляем множитель спавна
-        this.spawnDelayMultiplier = this.getSpawnMultiplier();
-        // Немедленно применяем burst эффект: "подтягиваем" следующий спавн ближе
-        const base = this.getPhaseSettings(this.currentPhase).spawnDelayMs;
-        const mult = this.getSpawnMultiplier();
-        const desired = this.time.now + base * mult;
-        this.nextSpawnAtMs = Math.min(this.nextSpawnAtMs, desired);
+        // Обновляем таймер спавна при изменении burst state
+        this.spawnSystem.onParamsChanged(this.time.now);
         // Применяем speed boost ко всем активным врагам
         this.applyBurstSpeedToEnemies(true);
       },
@@ -329,17 +366,12 @@ export class GameScene extends Phaser.Scene {
         console.log(`[BURST] END`);
         // Убираем speed boost
         this.applyBurstSpeedToEnemies(false);
-        // Обновляем множитель спавна
-        this.spawnDelayMultiplier = this.getSpawnMultiplier();
-        // Немедленно применяем recovery эффект: "отодвигаем" следующий спавн дальше
-        const base = this.getPhaseSettings(this.currentPhase).spawnDelayMs;
-        const mult = this.getSpawnMultiplier();
-        const desired = this.time.now + base * mult;
-        this.nextSpawnAtMs = Math.max(this.nextSpawnAtMs, desired);
+        // Обновляем таймер спавна при изменении burst state
+        this.spawnSystem.onParamsChanged(this.time.now);
       },
       onBurstStateChanged: (_state) => {
-        // Обновляем множитель спавна при изменении состояния burst
-        this.spawnDelayMultiplier = this.getSpawnMultiplier();
+        // Обновляем таймер спавна при изменении состояния burst
+        this.spawnSystem.onParamsChanged(this.time.now);
       },
     });
 
@@ -532,13 +564,13 @@ export class GameScene extends Phaser.Scene {
       this.currentPhase = phase;
       // Обновляем статистику
       this.stats.phase = this.currentPhase;
-      // Обновляем базовую задержку спавна (не пересоздаём таймер)
-      const settings = this.getPhaseSettings(this.currentPhase);
-      this.currentBaseSpawnDelayMs = settings.spawnDelayMs;
+      // Обновляем таймер спавна при смене фазы
+      this.spawnSystem.onParamsChanged(this.time.now);
       // Опционально: обновить debug текст
       if (this.phaseText) {
+        const phaseSettings = this.getPhaseSettings(this.currentPhase);
         this.phaseText.setText(
-          `PHASE: ${this.currentPhase} | Max: ${settings.maxAliveEnemies} | Delay: ${settings.spawnDelayMs}ms`
+          `PHASE: ${this.currentPhase} | Max: ${phaseSettings.maxAliveEnemies} | Delay: ${phaseSettings.spawnDelayMs}ms`
         );
       }
     }
@@ -694,103 +726,20 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  // Спавн врага по краям экрана
-  private spawnEnemy() {
+  // Спавн врага по краям экрана (вызывается из SpawnSystem)
+  private spawnEnemyByType(chosenType: SpawnEnemyType): void {
     if (this.gameOver || !this.player.isAlive()) {
       return;
     }
 
     const settings = this.getPhaseSettings(this.currentPhase);
 
-    // 1) Проверка maxAliveEnemies
-    const alive = this.enemies.countActive(true);
-    if (alive >= settings.maxAliveEnemies) {
-      return;
-    }
-
-    // 2) Проверка tankCap
-    const tanksAlive = this.getAliveTanksCount();
-    if (settings.tankCap === 0) {
-      // Фаза 1: только runner
-      const { width, height } = this.scale;
-      const side = Phaser.Math.Between(0, 3);
-      let x = 0;
-      let y = 0;
-
-      switch (side) {
-        case 0: // top
-          x = Phaser.Math.Between(0, width);
-          y = -20;
-          break;
-        case 1: // bottom
-          x = Phaser.Math.Between(0, width);
-          y = height + 20;
-          break;
-        case 2: // left
-          x = -20;
-          y = Phaser.Math.Between(0, height);
-          break;
-        case 3: // right
-          x = width + 20;
-          y = Phaser.Math.Between(0, height);
-          break;
-      }
-
-      const enemy = new Enemy(
-        this,
-        x,
-        y,
-        this.player,
-        "runner",
-        this.currentPhase,
-        this.enemies,
-        this.stageSystem.getStage()
-      );
-      this.enemies.add(enemy);
-
-      // Применяем stage speed multiplier
-      const stageSpeedMult = this.getStageSpeedMultiplier(
-        this.stageSystem.getStage()
-      );
-      const burstMult =
-        this.stageSystem.getBurstState() === "burst" ? BURST_SPEED_BOOST : 1.0;
-      enemy.setSpeedMultiplier(
-        stageSpeedMult * burstMult * this.enemySpeedMultiplier
-      );
-      return;
-    }
-
-    // 3) Выбор типа по весам (с учётом burst и stage)
-    let runnerWeight = settings.weights.runner;
-    let tankWeight = settings.weights.tank;
-
-    // Применяем stage modifier для веса танков
-    tankWeight = Math.round(
-      tankWeight *
-        this.getStageTankWeightMultiplier(this.stageSystem.getStage())
-    );
-
-    // Во время burst увеличиваем вес runner
-    if (this.stageSystem.getBurstState() === "burst") {
-      runnerWeight = Math.round(runnerWeight * BURST_RUNNER_WEIGHT_BOOST);
-    }
-
-    const totalWeight = runnerWeight + tankWeight;
-    let roll = Phaser.Math.Between(1, totalWeight);
-    let chosenType: EnemyType = "runner";
-
-    if (roll <= runnerWeight) {
-      chosenType = "runner";
-    } else {
-      chosenType = "tank";
-    }
-
-    // 4) Применить tankCap
-    if (chosenType === "tank" && tanksAlive >= settings.tankCap) {
+    // Проверка tankCap для фазы 1 (только runner)
+    if (settings.tankCap === 0 && chosenType !== "runner") {
       chosenType = "runner";
     }
 
-    // 5) Спавн
+    // Спавн
     const { width, height } = this.scale;
     const side = Phaser.Math.Between(0, 3);
     let x = 0;
@@ -842,6 +791,16 @@ export class GameScene extends Phaser.Scene {
       enemy.setFrozen(true);
       console.log(`[BUFF] freeze applied to spawned enemy`);
     }
+  }
+
+  // TODO: Remove after SpawnSystem integration complete
+  // @deprecated Use spawnEnemyByType instead
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  // @ts-ignore - deprecated method, kept for compatibility
+  private spawnEnemy() {
+    // This method is kept for compatibility but should not be called
+    // SpawnSystem now handles enemy type selection
+    console.warn("[DEPRECATED] spawnEnemy() called, use spawnEnemyByType()");
   }
 
   // Пуля попала во врага
@@ -1002,6 +961,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   // Stage-based modifiers
+  // @ts-ignore - unused method, kept for potential future use
   private getStageSpawnDelayMultiplier(stage: number): number {
     // Уменьшаем задержку спавна на 6% за стадию (спавн быстрее)
     // Минимум 0.6 (не быстрее чем в 1.67 раза)
@@ -1183,90 +1143,8 @@ export class GameScene extends Phaser.Scene {
     return 1.0;
   }
 
-  private startSpawnScheduler(time: number): void {
-    // Останавливаем старый планировщик, если есть
-    this.stopSpawnScheduler();
-
-    // Получаем базовую задержку из текущих настроек фазы
-    const settings = this.getPhaseSettings(this.currentPhase);
-    this.currentBaseSpawnDelayMs = settings.spawnDelayMs;
-
-    // Получаем множитель из текущего состояния burst
-    this.spawnDelayMultiplier = this.getSpawnMultiplier();
-
-    // Устанавливаем время следующего спавна
-    this.nextSpawnAtMs =
-      time + this.currentBaseSpawnDelayMs * this.spawnDelayMultiplier;
-
-    // Создаём стабильный looped timer, который тикает каждые 200ms
-    this.spawnTickEvent = this.time.addEvent({
-      delay: 200, // tick rate
-      loop: true,
-      callback: () => this.spawnTick(),
-    });
-  }
-
-  private stopSpawnScheduler(): void {
-    if (this.spawnTickEvent) {
-      this.spawnTickEvent.remove(false);
-      this.spawnTickEvent = undefined;
-    }
-  }
-
-  private spawnTick(): void {
-    if (this.gameOver || !this.isStarted || this.isStageClear) {
-      return;
-    }
-
-    const now = this.time.now;
-
-    // Проверяем, пора ли спавнить
-    if (now < this.nextSpawnAtMs) {
-      return;
-    }
-
-    // Проверяем лимит врагов
-    const settings = this.getPhaseSettings(this.currentPhase);
-    const alive = this.enemies.countActive(true);
-    if (alive >= settings.maxAliveEnemies) {
-      // Если достигнут лимит, откладываем следующий спавн на короткое время
-      this.nextSpawnAtMs = now + 500; // проверяем каждые 500ms
-      return;
-    }
-
-    // Спавним врага
-    this.spawnEnemy();
-
-    // Пересчитываем базовую задержку (на случай смены фазы)
-    const currentSettings = this.getPhaseSettings(this.currentPhase);
-    let baseDelay = currentSettings.spawnDelayMs;
-    // Применяем stage modifier
-    baseDelay =
-      baseDelay *
-      this.getStageSpawnDelayMultiplier(this.stageSystem.getStage());
-    baseDelay = Math.max(MIN_SPAWN_DELAY_MS, baseDelay);
-    this.currentBaseSpawnDelayMs = baseDelay;
-
-    // Пересчитываем множитель (на случай смены burst/recovery)
-    this.spawnDelayMultiplier = this.getSpawnMultiplier();
-
-    // Устанавливаем время следующего спавна
-    this.nextSpawnAtMs =
-      now + this.currentBaseSpawnDelayMs * this.spawnDelayMultiplier;
-
-    // Временный debug лог (только если debugLogs включен)
-    if (this.debugLogs && now - this.lastSpawnDebugLog >= 5000) {
-      this.lastSpawnDebugLog = now;
-      const nextIn = Math.max(0, this.nextSpawnAtMs - now);
-      console.log(
-        `[SPAWNDBG] alive=${alive} nextIn=${nextIn.toFixed(
-          0
-        )}ms state=${this.stageSystem.getBurstState()} mult=${this.spawnDelayMultiplier.toFixed(
-          2
-        )}`
-      );
-    }
-  }
+  // Spawn scheduler methods removed - now handled by SpawnSystem
+  // TODO: Remove deprecated methods after full integration
 
   private maybeDropLoot(x: number, y: number) {
     const dropChance = 0.1;
@@ -1638,7 +1516,7 @@ export class GameScene extends Phaser.Scene {
     this.printMatchSummary("GAME_OVER");
 
     // Останавливаем планировщик спавна
-    this.stopSpawnScheduler();
+    this.spawnSystem.stop();
 
     this.physics.pause();
 
@@ -1683,7 +1561,7 @@ export class GameScene extends Phaser.Scene {
     this.stats.weaponCurrent = this.weapon.getStats().name;
 
     // Стартуем стабильный планировщик спавна
-    this.startSpawnScheduler(this.time.now);
+    this.spawnSystem.start(this.time.now);
 
     // Stage start уже залогирован в callback
 
@@ -1861,7 +1739,7 @@ export class GameScene extends Phaser.Scene {
     this.isStageClear = true;
 
     // Останавливаем спавн
-    this.stopSpawnScheduler();
+    this.spawnSystem.stop();
 
     // Замораживаем физику
     this.physics.world.pause();
@@ -2121,11 +1999,11 @@ export class GameScene extends Phaser.Scene {
     this.applyStageSpeedToEnemies();
 
     // Запускаем спавн
-    this.startSpawnScheduler(now);
+    this.spawnSystem.start(now);
 
     // Логируем параметры стадии
     const settings = this.getPhaseSettings(this.currentPhase);
-    const spawnDelay = this.currentBaseSpawnDelayMs;
+    const spawnDelay = settings.spawnDelayMs;
     const runnerHP = this.getStageRunnerHP(this.stageSystem.getStage());
     const tankHP = this.getStageTankHP(this.stageSystem.getStage());
     const speedMult = this.getStageSpeedMultiplier(this.stageSystem.getStage());
