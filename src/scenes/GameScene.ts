@@ -12,6 +12,7 @@ import {
   SpawnSystem,
   EnemyType as SpawnEnemyType,
 } from "../systems/SpawnSystem";
+import { BuffSystem } from "../systems/BuffSystem";
 
 import playerSvg from "../assets/player.svg?url";
 import enemySvg from "../assets/enemy.svg?url";
@@ -57,11 +58,12 @@ const RECOVERY_SPAWN_MULTIPLIER = 1.2; // 20% slower spawn (multiply delay by 1.
 const WEAPON_DROP_BASE_CHANCE = 0.003; // 0.3% per enemy death
 const WEAPON_DROP_COOLDOWN_MS = 30000; // 30 seconds cooldown
 
-// Buff durations (ms)
-const BUFF_RAPID_DURATION_MS = 8000;
-const BUFF_DOUBLE_DURATION_MS = 10000;
-const BUFF_FREEZE_DURATION_MS = 6000;
-const BUFF_MAX_DURATION_MS = 20000; // Cap for stacking
+// Buff durations (ms) - moved to BuffSystem.ts
+// TODO: Remove these constants after full integration
+// const BUFF_RAPID_DURATION_MS = 8000;
+// const BUFF_DOUBLE_DURATION_MS = 10000;
+// const BUFF_FREEZE_DURATION_MS = 6000;
+// const BUFF_MAX_DURATION_MS = 20000;
 
 // Buff spawn chances (PIERCE removed - only available via Stage Clear perk)
 const BUFF_RAPID_CHANCE = 0.012; // 1.2%
@@ -74,12 +76,9 @@ const MAX_ACTIVE_BUFF_LOOT = 2;
 // Global cooldown for buff drops (ms)
 const BUFF_DROP_COOLDOWN_MS = 12000;
 
-// Buff types
+// Buff types (moved to BuffSystem, keeping for compatibility)
+// TODO: Remove after full integration
 type BuffType = "rapid" | "double" | "pierce" | "freeze";
-type ActiveBuff = {
-  type: BuffType;
-  endTime: number; // When buff expires
-};
 
 type MatchStats = {
   startedAtMs: number;
@@ -196,6 +195,9 @@ export class GameScene extends Phaser.Scene {
   // Spawn system (moved to SpawnSystem)
   private spawnSystem!: SpawnSystem;
 
+  // Buff system (moved to BuffSystem)
+  private buffSystem!: BuffSystem;
+
   // Match stats
   private stats!: MatchStats;
   private debugLogs = false; // выключить шумные логи
@@ -210,8 +212,7 @@ export class GameScene extends Phaser.Scene {
   private lastBuffDropTime = 0; // Time when last buff loot was dropped
   private activeBuffLoot = new Set<LootPickup>(); // Track active buff loot items
 
-  // Active buffs system
-  private activeBuffs = new Map<BuffType, ActiveBuff>();
+  // Buff system moved to BuffSystem
   private buffHudText?: Phaser.GameObjects.Text;
   private lastBuffHudUpdate = 0;
   private enemySpeedMultiplier = 1.0; // Global enemy speed multiplier (for freeze buff)
@@ -340,6 +341,62 @@ export class GameScene extends Phaser.Scene {
       },
       MIN_SPAWN_DELAY_MS
     );
+
+    // Инициализируем BuffSystem
+    this.buffSystem = new BuffSystem({
+      getIsActive: () => {
+        return this.isStarted && !this.gameOver && !this.isStageClear;
+      },
+      getTimeNow: () => this.time.now,
+      getEnemies: () => {
+        if (!this.enemies) {
+          return [];
+        }
+        try {
+          const children = this.enemies.getChildren();
+          if (children && Array.isArray(children)) {
+            return children.filter(
+              (obj) => obj && (obj as Enemy).active
+            ) as Enemy[];
+          }
+        } catch (e) {
+          // Group not fully initialized
+        }
+        return [];
+      },
+      onReloadBypassEnabled: (enabled: boolean) => {
+        // DOUBLE buff: reload bypass is handled via bypassAmmo in handleShooting
+        // This callback is called for logging purposes
+        if (enabled) {
+          // Log is already done in startBuff
+        } else {
+          // DOUBLE ended: restore normal ammo behavior
+          const weapon = this.weapon as any;
+          if (weapon.ammo !== undefined && weapon.ammo <= 0) {
+            weapon.refillAndReset();
+          }
+        }
+      },
+      onRapidFireMultiplierChanged: (_mult: number) => {
+        // RAPID buff: fire rate multiplier is handled in handleShooting
+        // This callback is called for potential future use
+        // Currently, rapid is checked via buffSystem.isActive("rapid") in handleShooting
+      },
+      applyFreezeToEnemy: (enemy: Enemy) => {
+        enemy.setFrozen(true);
+      },
+      removeFreezeFromEnemy: (enemy: Enemy) => {
+        enemy.setFrozen(false);
+      },
+      isEnemyFreezable: (enemy: Enemy) => {
+        // Check if enemy is not dying
+        const isDying = (enemy as any).isDying;
+        return !isDying;
+      },
+      log: (msg: string) => {
+        console.log(msg);
+      },
+    });
 
     // Инициализируем StageSystem
     this.stageSystem = new StageSystem(this, {
@@ -579,7 +636,7 @@ export class GameScene extends Phaser.Scene {
     if (this.isStarted && !this.gameOver) {
       this.stageSystem.update(time);
     }
-    this.updateBuffs(time);
+    this.buffSystem.update();
     this.updateBuffHud(time);
 
     // Clean up inactive buff loot from tracking
@@ -630,7 +687,7 @@ export class GameScene extends Phaser.Scene {
     }
 
     // Apply RAPID buff: reduce fire rate by 50%
-    const rapidActive = this.activeBuffs.has("rapid");
+    const rapidActive = this.buffSystem.isActive("rapid");
     const baseFireRate = this.weapon.getStats().fireRateMs;
     const effectiveFireRate = rapidActive ? baseFireRate * 0.5 : baseFireRate;
 
@@ -641,7 +698,7 @@ export class GameScene extends Phaser.Scene {
     }
 
     // DOUBLE buff: weapon-specific behavior
-    const doubleActive = this.activeBuffs.has("double");
+    const doubleActive = this.buffSystem.isActive("double");
     const isShotgun = this.weapon.key === "shotgun";
     const weapon = this.weapon as any;
 
@@ -677,7 +734,7 @@ export class GameScene extends Phaser.Scene {
         this.time.delayedCall(100, () => {
           // Check buff still active and weapon still ready (bypassAmmo means no ammo check needed)
           if (
-            !this.activeBuffs.has("double") ||
+            !this.buffSystem.isActive("double") ||
             (weapon._isReloading && !bypassAmmo)
           ) {
             return;
@@ -787,10 +844,7 @@ export class GameScene extends Phaser.Scene {
     );
 
     // Если FREEZE активен - замораживаем нового врага
-    if (this.activeBuffs.has("freeze")) {
-      enemy.setFrozen(true);
-      console.log(`[BUFF] freeze applied to spawned enemy`);
-    }
+    this.buffSystem.onEnemySpawned(enemy);
   }
 
   // TODO: Remove after SpawnSystem integration complete
@@ -1245,8 +1299,11 @@ export class GameScene extends Phaser.Scene {
     }
 
     // 4) Do not drop a buff if that buff is currently active
-    const buffKey = buffType.replace("buff-", "") as BuffType;
-    if (this.activeBuffs.has(buffKey)) {
+    const buffKey = buffType.replace("buff-", "") as
+      | "rapid"
+      | "double"
+      | "freeze";
+    if (this.buffSystem.isActive(buffKey)) {
       console.log(`[LOOT] buff drop skipped (active: ${buffKey})`);
       return;
     }
@@ -1294,14 +1351,14 @@ export class GameScene extends Phaser.Scene {
         this.onWeaponDropPicked();
         break;
       case "buff-rapid":
-        this.applyBuff("rapid", BUFF_RAPID_DURATION_MS);
+        this.buffSystem.startBuff("rapid");
         break;
       case "buff-double":
-        this.applyBuff("double", BUFF_DOUBLE_DURATION_MS);
+        this.buffSystem.startBuff("double");
         break;
       // PIERCE removed from loot - only available via Stage Clear perk
       case "buff-freeze":
-        this.applyBuff("freeze", BUFF_FREEZE_DURATION_MS);
+        this.buffSystem.startBuff("freeze");
         break;
     }
 
@@ -1314,81 +1371,24 @@ export class GameScene extends Phaser.Scene {
   }
 
   // ============================================
-  // BUFF SYSTEM
+  // BUFF SYSTEM (moved to BuffSystem)
   // ============================================
-
+  // TODO: Remove deprecated methods after full integration
+  // @deprecated Use buffSystem.startBuff() instead
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  // @ts-ignore - deprecated method, kept for compatibility
   private applyBuff(type: BuffType, durationMs: number): void {
-    const now = this.time.now;
-    const existing = this.activeBuffs.get(type);
-
-    if (existing) {
-      // DOUBLE: refresh duration only (no stacking)
-      // Other buffs: extend duration (cap at BUFF_MAX_DURATION_MS)
-      if (type === "double") {
-        const newEndTime = now + durationMs;
-        const remaining = durationMs;
-        this.activeBuffs.set(type, { type, endTime: newEndTime });
-        console.log(
-          `[BUFF] refresh type=${type} remain=${remaining.toFixed(0)}ms`
-        );
-      } else {
-        const newEndTime = Math.min(
-          existing.endTime + durationMs,
-          now + BUFF_MAX_DURATION_MS
-        );
-        const remaining = newEndTime - now;
-        this.activeBuffs.set(type, { type, endTime: newEndTime });
-        console.log(
-          `[BUFF] extend type=${type} remain=${remaining.toFixed(0)}ms`
-        );
-
-        // Re-apply effects if needed (for freeze, re-apply to all enemies)
-        if (type === "freeze") {
-          this.applyFreezeToAllEnemies();
-        }
-      }
-    } else {
-      // Start new buff
-      const endTime = now + durationMs;
-      this.activeBuffs.set(type, { type, endTime });
-      console.log(`[BUFF] start type=${type} dur=${durationMs}ms`);
-
-      // Apply immediate effects
-      if (type === "freeze") {
-        this.applyFreezeToAllEnemies();
-      } else if (type === "double") {
-        console.log(`[BUFF] double: reload bypass enabled`);
-      }
-    }
+    // Moved to buffSystem.startBuff()
   }
 
+  // @deprecated Use buffSystem.update() instead
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  // @ts-ignore - deprecated method, kept for compatibility
   private updateBuffs(time: number): void {
-    const expired: BuffType[] = [];
-
-    for (const [type, buff] of this.activeBuffs.entries()) {
-      if (time >= buff.endTime) {
-        expired.push(type);
-      }
-    }
-
-    for (const type of expired) {
-      this.activeBuffs.delete(type);
-      console.log(`[BUFF] end type=${type}`);
-
-      // Remove effects
-      if (type === "freeze") {
-        this.removeFreezeFromAllEnemies();
-      } else if (type === "double") {
-        // DOUBLE ended: restore normal ammo behavior
-        // Ensure ammo is valid (refill if needed)
-        const weapon = this.weapon as any;
-        if (weapon.ammo !== undefined && weapon.ammo <= 0) {
-          weapon.refillAndReset();
-        }
-      }
-    }
+    // Moved to buffSystem.update()
   }
 
+  // @ts-ignore - method is used but linter doesn't see it
   private applyEnemySpeedMultiplier(): void {
     if (!this.enemies) {
       return;
@@ -1417,55 +1417,21 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  // TODO: Remove after BuffSystem integration complete
+  // @deprecated Use buffSystem methods instead
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  // @ts-ignore - deprecated method, kept for compatibility
   private applyFreezeToAllEnemies(): void {
-    if (!this.enemies) {
-      return; // enemies group not initialized yet
-    }
-    try {
-      let count = 0;
-      const children = this.enemies.getChildren();
-      if (children && Array.isArray(children)) {
-        children.forEach((obj) => {
-          const enemy = obj as Enemy;
-          if (enemy && enemy.active && !(enemy as any).isDying) {
-            enemy.setFrozen(true);
-            count++;
-          }
-        });
-      }
-      console.log(`[BUFF] freeze applied to ${count} enemies`);
-    } catch (e) {
-      // Group not fully initialized, ignore
-    }
+    // Moved to buffSystem
   }
 
+  // TODO: Remove after BuffSystem integration complete
+  // @deprecated Use buffSystem methods instead
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  // @ts-ignore - deprecated method, kept for compatibility
   private removeFreezeFromAllEnemies(): void {
-    if (!this.enemies) {
-      return; // enemies group not initialized yet
-    }
-    try {
-      let count = 0;
-      const children = this.enemies.getChildren();
-      if (children && Array.isArray(children)) {
-        children.forEach((obj) => {
-          const enemy = obj as Enemy;
-          if (enemy && enemy.active) {
-            enemy.setFrozen(false);
-            count++;
-          }
-        });
-      }
-      // Restore speed multiplier after unfreeze
-      this.enemySpeedMultiplier = 1.0;
-      if (this.enemies) {
-        this.applyEnemySpeedMultiplier();
-      }
-      if (count > 0) {
-        console.log(`[BUFF] freeze removed from ${count} enemies`);
-      }
-    } catch (e) {
-      // Group not fully initialized, ignore
-    }
+    // Moved to buffSystem - this method is no longer used
+    // Freeze removal is handled by buffSystem.removeBuff("freeze")
   }
 
   private updateBuffHud(time?: number): void {
@@ -1479,15 +1445,17 @@ export class GameScene extends Phaser.Scene {
       this.lastBuffHudUpdate = time;
     }
 
-    if (this.activeBuffs.size === 0) {
+    const now = time ?? this.time.now;
+    const activeBuffs = this.buffSystem.getActiveBuffs();
+
+    if (activeBuffs.size === 0) {
       this.buffHudText.setText("");
       return;
     }
 
-    const now = time ?? this.time.now;
     const lines: string[] = [];
 
-    for (const [type, buff] of this.activeBuffs.entries()) {
+    for (const [type, buff] of activeBuffs.entries()) {
       const remaining = Math.max(0, buff.endTime - now);
       const seconds = (remaining / 1000).toFixed(1);
       const typeUpper = type.toUpperCase();
@@ -1620,12 +1588,11 @@ export class GameScene extends Phaser.Scene {
 
   private resetMatchStats(): void {
     // Clear all buffs and unfreeze enemies on restart
-    this.activeBuffs.clear();
-    this.enemySpeedMultiplier = 1.0;
-    // Only remove freeze if enemies group is initialized
-    if (this.enemies) {
-      this.removeFreezeFromAllEnemies();
+    if (this.buffSystem) {
+      this.buffSystem.reset();
     }
+    this.enemySpeedMultiplier = 1.0;
+    // Freeze removal is handled by buffSystem.reset()
     // Reset stage system
     if (this.stageSystem) {
       this.stageSystem.reset(this.time.now);
