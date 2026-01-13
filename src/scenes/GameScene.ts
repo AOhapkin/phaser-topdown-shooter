@@ -3,11 +3,7 @@ import { Player } from "../entities/Player";
 import { Bullet } from "../entities/Bullet";
 import { Enemy } from "../entities/Enemy";
 import { LootPickup, LootType } from "../entities/LootPickup";
-import { Weapon } from "../weapons/types";
-// BasicGun and Shotgun moved to WeaponSystem
-// TODO: Remove after full integration
-// import { BasicGun } from "../weapons/BasicGun";
-// import { Shotgun } from "../weapons/Shotgun";
+// Weapon, BasicGun, and Shotgun moved to WeaponSystem
 import { LevelUpOption } from "../ui/LevelUpOverlay";
 import { StageSystem } from "../systems/StageSystem";
 import {
@@ -16,6 +12,7 @@ import {
 } from "../systems/SpawnSystem";
 import { BuffSystem } from "../systems/BuffSystem";
 import { WeaponSystem } from "../systems/WeaponSystem";
+import { OverlaySystem } from "../systems/OverlaySystem";
 
 import playerSvg from "../assets/player.svg?url";
 import enemySvg from "../assets/enemy.svg?url";
@@ -190,10 +187,6 @@ export class GameScene extends Phaser.Scene {
   private restartKey!: Phaser.Input.Keyboard.Key;
   private continueKey!: Phaser.Input.Keyboard.Key;
   private loot!: Phaser.Physics.Arcade.Group;
-  // Weapon moved to WeaponSystem
-  // TODO: Remove after full integration
-  // @ts-ignore - kept for compatibility with existing code that might reference it
-  private weapon!: Weapon;
   private stageClearOverlay?: Phaser.GameObjects.Container;
 
   // Phase system
@@ -212,6 +205,9 @@ export class GameScene extends Phaser.Scene {
 
   // Weapon system (moved to WeaponSystem)
   private weaponSystem!: WeaponSystem;
+
+  // Overlay system
+  private overlaySystem!: OverlaySystem;
 
   // Match stats
   private stats!: MatchStats;
@@ -308,6 +304,9 @@ export class GameScene extends Phaser.Scene {
       runChildUpdate: false,
     });
 
+    // Инициализируем OverlaySystem
+    this.overlaySystem = new OverlaySystem();
+
     // Инициализируем статистику (weaponSystem будет инициализирован после)
     this.resetMatchStats();
 
@@ -376,7 +375,7 @@ export class GameScene extends Phaser.Scene {
         return [];
       },
       onReloadBypassEnabled: (enabled: boolean) => {
-        // DOUBLE buff: reload bypass is handled via bypassAmmo in handleShooting
+        // DOUBLE buff: reload bypass is handled via bypassAmmo in WeaponSystem
         // This callback is called for logging purposes
         if (enabled) {
           // Log is already done in startBuff
@@ -386,9 +385,9 @@ export class GameScene extends Phaser.Scene {
         }
       },
       onRapidFireMultiplierChanged: (_mult: number) => {
-        // RAPID buff: fire rate multiplier is handled in handleShooting
+        // RAPID buff: fire rate multiplier is handled in WeaponSystem.tryShoot()
         // This callback is called for potential future use
-        // Currently, rapid is checked via buffSystem.isActive("rapid") in handleShooting
+        // Currently, rapid is checked via buffSystem.isActive("rapid") in WeaponSystem
       },
       applyFreezeToEnemy: (enemy: Enemy) => {
         enemy.setFrozen(true);
@@ -590,6 +589,7 @@ export class GameScene extends Phaser.Scene {
 
     // Стартовый экран: оверлей + title + мерцающий hint
     this.isStarted = false;
+    this.overlaySystem.open("start");
 
     this.startOverlay = this.add
       .rectangle(width / 2, height / 2, width, height, 0x000000, 0.94)
@@ -630,7 +630,13 @@ export class GameScene extends Phaser.Scene {
     // Обработчик клика с stopPropagation
     this.startOverlay.on(
       "pointerdown",
-      (_p: Phaser.Input.Pointer, _lx: number, _ly: number, event: any) => {
+      (
+        _pointer: Phaser.Input.Pointer,
+        _lx: number,
+        _ly: number,
+        event: any
+      ) => {
+        // Stop event propagation to prevent gameplay input
         if (event?.stopPropagation) {
           event.stopPropagation();
         }
@@ -703,22 +709,16 @@ export class GameScene extends Phaser.Scene {
       // Update weapon system
       this.weaponSystem.update();
 
-      // Handle shooting input
-      const pointer = this.input.activePointer;
-      if (pointer.isDown) {
-        this.weaponSystem.tryShoot();
+      // Guard: block gameplay input when overlay is open
+      if (!this.overlaySystem.isBlockingInput()) {
+        // Handle shooting input
+        const pointer = this.input.activePointer;
+        if (pointer.isDown) {
+          this.weaponSystem.tryShoot();
+        }
       }
       this.updateAmmoUI(time);
     }
-  }
-
-  // Shooting logic moved to WeaponSystem
-  // TODO: Remove deprecated method after full integration
-  // @deprecated Use weaponSystem.tryShoot() instead
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  // @ts-ignore - deprecated method, kept for compatibility
-  private handleShooting(time: number) {
-    // Moved to weaponSystem.tryShoot()
   }
 
   // Спавн врага по краям экрана (вызывается из SpawnSystem)
@@ -1394,6 +1394,7 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.gameOver = true;
+    this.overlaySystem.open("gameover");
 
     // Clear buff loot tracking on game over
     this.activeBuffLoot.forEach((loot) => {
@@ -1438,6 +1439,7 @@ export class GameScene extends Phaser.Scene {
     this.weaponSystem.setSuppressShootingUntil(this.time.now + 200);
 
     this.isStarted = true;
+    this.overlaySystem.close();
 
     // Устанавливаем время начала забега
     this.runStartTime = this.time.now;
@@ -1517,6 +1519,11 @@ export class GameScene extends Phaser.Scene {
   }
 
   private resetMatchStats(): void {
+    // Close any open overlays on restart
+    if (this.overlaySystem) {
+      this.overlaySystem.close();
+    }
+
     // Clear all buffs and unfreeze enemies on restart
     if (this.buffSystem) {
       this.buffSystem.reset();
@@ -1633,6 +1640,7 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.isStageClear = true;
+    this.overlaySystem.open("stageclear");
 
     // Останавливаем спавн
     this.spawnSystem.stop();
@@ -1783,6 +1791,7 @@ export class GameScene extends Phaser.Scene {
           _y: number,
           event: any
         ) => {
+          // Stop event propagation to prevent gameplay input
           if (event?.stopPropagation) {
             event.stopPropagation();
           }
@@ -1882,6 +1891,7 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.isStageClear = false;
+    this.overlaySystem.close();
     this.hideStageClearOverlay();
 
     // Возобновляем физику
