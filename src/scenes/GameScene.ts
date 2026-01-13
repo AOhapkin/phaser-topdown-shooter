@@ -7,6 +7,7 @@ import { Weapon } from "../weapons/types";
 import { BasicGun } from "../weapons/BasicGun";
 import { Shotgun } from "../weapons/Shotgun";
 import { LevelUpOption } from "../ui/LevelUpOverlay";
+import { StageSystem } from "../systems/StageSystem";
 
 import playerSvg from "../assets/player.svg?url";
 import enemySvg from "../assets/enemy.svg?url";
@@ -40,14 +41,7 @@ type PhaseSettings = {
 const PHASE_DURATION_SEC = 45;
 const MIN_SPAWN_DELAY_MS = 560;
 
-// Stage system constants
-const STAGE_DURATION_SEC = 75;
-const BURST_INTERVAL_MIN_SEC = 12;
-const BURST_INTERVAL_MAX_SEC = 15;
-const BURST_DURATION_MIN_SEC = 4;
-const BURST_DURATION_MAX_SEC = 6;
-const RECOVERY_DURATION_MIN_SEC = 2;
-const RECOVERY_DURATION_MAX_SEC = 3;
+// Stage system constants moved to StageSystem.ts
 
 // Burst modifiers
 const BURST_SPAWN_REDUCTION = 0.45; // 45% reduction (spawn 55% faster)
@@ -195,16 +189,8 @@ export class GameScene extends Phaser.Scene {
   private currentPhase = 1;
   private phaseText?: Phaser.GameObjects.Text;
 
-  // Stage system
-  private currentStage = 1;
-  private stageStartTime = 0; // Time when current stage started
-  private stageElapsedSec = 0;
-
-  // Burst cycle
-  private burstState: "idle" | "burst" | "recovery" = "idle";
-  private nextBurstTime = 0; // When next burst should start
-  private burstEndTime = 0; // When current burst ends
-  private recoveryEndTime = 0; // When recovery ends
+  // Stage system (moved to StageSystem)
+  private stageSystem!: StageSystem;
 
   // Match stats
   private stats!: MatchStats;
@@ -256,15 +242,8 @@ export class GameScene extends Phaser.Scene {
     this.runStartTime = 0;
     this.currentPhase = 1;
 
-    // Сбрасываем stage system
-    this.currentStage = 1;
-    this.stageStartTime = 0;
-    this.stageElapsedSec = 0;
-    this.burstState = "idle";
+    // Stage system will be initialized after this
     this.isStageClear = false;
-    this.nextBurstTime = 0;
-    this.burstEndTime = 0;
-    this.recoveryEndTime = 0;
 
     // Убираем overlay, если есть
     this.hideStageClearOverlay();
@@ -319,6 +298,50 @@ export class GameScene extends Phaser.Scene {
 
     // Инициализируем статистику после создания оружия
     this.resetMatchStats();
+
+    // Инициализируем StageSystem
+    this.stageSystem = new StageSystem(this, {
+      onStageStart: (stage: number) => {
+        console.log(`[STAGE] START stage=${stage}`);
+      },
+      onStageEnd: (stage: number, survived: boolean) => {
+        console.log(`[STAGE] END stage=${stage} survived=${survived}`);
+        this.endStage(survived);
+        this.onStageClear();
+      },
+      onBurstStart: (stageElapsedSec: number, durationSec: number) => {
+        console.log(
+          `[BURST] START t=${stageElapsedSec.toFixed(
+            1
+          )}s duration=${durationSec.toFixed(1)}s`
+        );
+        // Обновляем множитель спавна
+        this.spawnDelayMultiplier = this.getSpawnMultiplier();
+        // Немедленно применяем burst эффект: "подтягиваем" следующий спавн ближе
+        const base = this.getPhaseSettings(this.currentPhase).spawnDelayMs;
+        const mult = this.getSpawnMultiplier();
+        const desired = this.time.now + base * mult;
+        this.nextSpawnAtMs = Math.min(this.nextSpawnAtMs, desired);
+        // Применяем speed boost ко всем активным врагам
+        this.applyBurstSpeedToEnemies(true);
+      },
+      onBurstEnd: () => {
+        console.log(`[BURST] END`);
+        // Убираем speed boost
+        this.applyBurstSpeedToEnemies(false);
+        // Обновляем множитель спавна
+        this.spawnDelayMultiplier = this.getSpawnMultiplier();
+        // Немедленно применяем recovery эффект: "отодвигаем" следующий спавн дальше
+        const base = this.getPhaseSettings(this.currentPhase).spawnDelayMs;
+        const mult = this.getSpawnMultiplier();
+        const desired = this.time.now + base * mult;
+        this.nextSpawnAtMs = Math.max(this.nextSpawnAtMs, desired);
+      },
+      onBurstStateChanged: (_state) => {
+        // Обновляем множитель спавна при изменении состояния burst
+        this.spawnDelayMultiplier = this.getSpawnMultiplier();
+      },
+    });
 
     // Группа врагов
     this.enemies = this.physics.add.group({
@@ -521,7 +544,9 @@ export class GameScene extends Phaser.Scene {
     }
 
     // Обновление stage system
-    this.updateStageSystem(time);
+    if (this.isStarted && !this.gameOver) {
+      this.stageSystem.update(time);
+    }
     this.updateBuffs(time);
     this.updateBuffHud(time);
 
@@ -719,13 +744,16 @@ export class GameScene extends Phaser.Scene {
         "runner",
         this.currentPhase,
         this.enemies,
-        this.currentStage
+        this.stageSystem.getStage()
       );
       this.enemies.add(enemy);
 
       // Применяем stage speed multiplier
-      const stageSpeedMult = this.getStageSpeedMultiplier(this.currentStage);
-      const burstMult = this.burstState === "burst" ? BURST_SPEED_BOOST : 1.0;
+      const stageSpeedMult = this.getStageSpeedMultiplier(
+        this.stageSystem.getStage()
+      );
+      const burstMult =
+        this.stageSystem.getBurstState() === "burst" ? BURST_SPEED_BOOST : 1.0;
       enemy.setSpeedMultiplier(
         stageSpeedMult * burstMult * this.enemySpeedMultiplier
       );
@@ -738,11 +766,12 @@ export class GameScene extends Phaser.Scene {
 
     // Применяем stage modifier для веса танков
     tankWeight = Math.round(
-      tankWeight * this.getStageTankWeightMultiplier(this.currentStage)
+      tankWeight *
+        this.getStageTankWeightMultiplier(this.stageSystem.getStage())
     );
 
     // Во время burst увеличиваем вес runner
-    if (this.burstState === "burst") {
+    if (this.stageSystem.getBurstState() === "burst") {
       runnerWeight = Math.round(runnerWeight * BURST_RUNNER_WEIGHT_BOOST);
     }
 
@@ -794,13 +823,16 @@ export class GameScene extends Phaser.Scene {
       chosenType,
       this.currentPhase,
       this.enemies,
-      this.currentStage
+      this.stageSystem.getStage()
     );
     this.enemies.add(enemy);
 
     // Применяем stage speed multiplier
-    const stageSpeedMult = this.getStageSpeedMultiplier(this.currentStage);
-    const burstMult = this.burstState === "burst" ? BURST_SPEED_BOOST : 1.0;
+    const stageSpeedMult = this.getStageSpeedMultiplier(
+      this.stageSystem.getStage()
+    );
+    const burstMult =
+      this.stageSystem.getBurstState() === "burst" ? BURST_SPEED_BOOST : 1.0;
     enemy.setSpeedMultiplier(
       stageSpeedMult * burstMult * this.enemySpeedMultiplier
     );
@@ -989,7 +1021,7 @@ export class GameScene extends Phaser.Scene {
 
   private applyStageSpeedToEnemies(): void {
     // Применяем stage speed multiplier ко всем активным врагам
-    const mult = this.getStageSpeedMultiplier(this.currentStage);
+    const mult = this.getStageSpeedMultiplier(this.stageSystem.getStage());
     const children = this.enemies.getChildren();
     for (let i = 0; i < children.length; i++) {
       const enemy = children[i] as Enemy;
@@ -998,7 +1030,9 @@ export class GameScene extends Phaser.Scene {
         if (!isDying) {
           // Если сейчас burst, учитываем burst multiplier
           const finalMult =
-            this.burstState === "burst" ? mult * BURST_SPEED_BOOST : mult;
+            this.stageSystem.getBurstState() === "burst"
+              ? mult * BURST_SPEED_BOOST
+              : mult;
           enemy.setSpeedMultiplier(finalMult);
         }
       }
@@ -1140,10 +1174,10 @@ export class GameScene extends Phaser.Scene {
   // ============================================
 
   private getSpawnMultiplier(): number {
-    if (this.burstState === "burst") {
+    if (this.stageSystem.getBurstState() === "burst") {
       return 1 - BURST_SPAWN_REDUCTION; // e.g. 0.55 (45% faster)
     }
-    if (this.burstState === "recovery") {
+    if (this.stageSystem.getBurstState() === "recovery") {
       return RECOVERY_SPAWN_MULTIPLIER; // e.g. 1.2 (20% slower)
     }
     return 1.0;
@@ -1208,7 +1242,8 @@ export class GameScene extends Phaser.Scene {
     let baseDelay = currentSettings.spawnDelayMs;
     // Применяем stage modifier
     baseDelay =
-      baseDelay * this.getStageSpawnDelayMultiplier(this.currentStage);
+      baseDelay *
+      this.getStageSpawnDelayMultiplier(this.stageSystem.getStage());
     baseDelay = Math.max(MIN_SPAWN_DELAY_MS, baseDelay);
     this.currentBaseSpawnDelayMs = baseDelay;
 
@@ -1224,9 +1259,11 @@ export class GameScene extends Phaser.Scene {
       this.lastSpawnDebugLog = now;
       const nextIn = Math.max(0, this.nextSpawnAtMs - now);
       console.log(
-        `[SPAWNDBG] alive=${alive} nextIn=${nextIn.toFixed(0)}ms state=${
-          this.burstState
-        } mult=${this.spawnDelayMultiplier.toFixed(2)}`
+        `[SPAWNDBG] alive=${alive} nextIn=${nextIn.toFixed(
+          0
+        )}ms state=${this.stageSystem.getBurstState()} mult=${this.spawnDelayMultiplier.toFixed(
+          2
+        )}`
       );
     }
   }
@@ -1485,10 +1522,12 @@ export class GameScene extends Phaser.Scene {
           const enemy = obj as Enemy;
           if (enemy && enemy.active && !enemy.isFrozen()) {
             const stageSpeedMult = this.getStageSpeedMultiplier(
-              this.currentStage
+              this.stageSystem.getStage()
             );
             const burstMult =
-              this.burstState === "burst" ? BURST_SPEED_BOOST : 1.0;
+              this.stageSystem.getBurstState() === "burst"
+                ? BURST_SPEED_BOOST
+                : 1.0;
             enemy.setSpeedMultiplier(
               stageSpeedMult * burstMult * this.enemySpeedMultiplier
             );
@@ -1636,11 +1675,7 @@ export class GameScene extends Phaser.Scene {
     this.currentPhase = 1;
 
     // Инициализируем stage system
-    this.currentStage = 1;
-    this.stageStartTime = this.time.now;
-    this.stageElapsedSec = 0;
-    this.burstState = "idle";
-    this.scheduleNextBurst();
+    this.stageSystem.start(this.time.now);
 
     // Обновляем статистику при старте
     this.stats.startedAtMs = this.time.now;
@@ -1650,8 +1685,7 @@ export class GameScene extends Phaser.Scene {
     // Стартуем стабильный планировщик спавна
     this.startSpawnScheduler(this.time.now);
 
-    // Логируем начало stage
-    console.log(`[STAGE] START stage=${this.currentStage}`);
+    // Stage start уже залогирован в callback
 
     // Опционально: debug текст фазы
     if (this.debugEnabled) {
@@ -1713,6 +1747,10 @@ export class GameScene extends Phaser.Scene {
     // Only remove freeze if enemies group is initialized
     if (this.enemies) {
       this.removeFreezeFromAllEnemies();
+    }
+    // Reset stage system
+    if (this.stageSystem) {
+      this.stageSystem.reset(this.time.now);
     }
 
     // Clear buff loot tracking and destroy all buff loot items
@@ -1799,27 +1837,12 @@ export class GameScene extends Phaser.Scene {
   // STAGE SYSTEM
   // ============================================
 
-  private updateStageSystem(time: number): void {
-    if (!this.isStarted || this.gameOver) {
-      return;
-    }
-
-    // Обновляем время стадии
-    this.stageElapsedSec = (time - this.stageStartTime) / 1000;
-
-    // Проверяем завершение стадии
-    if (this.stageElapsedSec >= STAGE_DURATION_SEC) {
-      this.endStage(true);
-      this.onStageClear();
-      return;
-    }
-
-    // Обновляем burst cycle
-    this.updateBurstCycle(time);
-  }
+  // updateStageSystem removed - now handled by stageSystem.update()
 
   private endStage(survived: boolean): void {
-    console.log(`[STAGE] END stage=${this.currentStage} survived=${survived}`);
+    console.log(
+      `[STAGE] END stage=${this.stageSystem.getStage()} survived=${survived}`
+    );
   }
 
   private onStageClear(): void {
@@ -1862,7 +1885,7 @@ export class GameScene extends Phaser.Scene {
     // Показываем overlay
     this.showStageClearOverlay();
 
-    console.log(`[STAGE] CLEAR stage=${this.currentStage}`);
+    console.log(`[STAGE] CLEAR stage=${this.stageSystem.getStage()}`);
   }
 
   private showStageClearOverlay(): void {
@@ -1882,11 +1905,16 @@ export class GameScene extends Phaser.Scene {
 
     // Заголовок
     const title = this.add
-      .text(width / 2, height / 2 - 180, `STAGE ${this.currentStage} CLEAR`, {
-        fontSize: "56px",
-        color: "#ffffff",
-        fontStyle: "bold",
-      })
+      .text(
+        width / 2,
+        height / 2 - 180,
+        `STAGE ${this.stageSystem.getStage()} CLEAR`,
+        {
+          fontSize: "56px",
+          color: "#ffffff",
+          fontStyle: "bold",
+        }
+      )
       .setOrigin(0.5)
       .setScrollFactor(0)
       .setDepth(30001);
@@ -2085,13 +2113,9 @@ export class GameScene extends Phaser.Scene {
     // Возобновляем физику
     this.physics.world.resume();
 
-    // Переходим к следующей стадии
+    // StageSystem уже инкрементировал стадию в update() через callback onStageEnd
+    // Просто применяем эффекты для новой стадии
     const now = this.time.now;
-    this.currentStage++;
-    this.stageStartTime = now;
-    this.stageElapsedSec = 0;
-    this.burstState = "idle";
-    this.scheduleNextBurst();
 
     // Применяем stage speed multiplier ко всем врагам
     this.applyStageSpeedToEnemies();
@@ -2102,17 +2126,17 @@ export class GameScene extends Phaser.Scene {
     // Логируем параметры стадии
     const settings = this.getPhaseSettings(this.currentPhase);
     const spawnDelay = this.currentBaseSpawnDelayMs;
-    const runnerHP = this.getStageRunnerHP(this.currentStage);
-    const tankHP = this.getStageTankHP(this.currentStage);
-    const speedMult = this.getStageSpeedMultiplier(this.currentStage);
+    const runnerHP = this.getStageRunnerHP(this.stageSystem.getStage());
+    const tankHP = this.getStageTankHP(this.stageSystem.getStage());
+    const speedMult = this.getStageSpeedMultiplier(this.stageSystem.getStage());
     const tankWeight = Math.round(
       settings.weights.tank *
-        this.getStageTankWeightMultiplier(this.currentStage)
+        this.getStageTankWeightMultiplier(this.stageSystem.getStage())
     );
     console.log(
-      `[STAGE] START stage=${
-        this.currentStage
-      } (spawnDelay=${spawnDelay.toFixed(0)}ms, weights=runner:${
+      `[STAGE] START stage=${this.stageSystem.getStage()} (spawnDelay=${spawnDelay.toFixed(
+        0
+      )}ms, weights=runner:${
         settings.weights.runner
       }/tank:${tankWeight}, hpRunner=${runnerHP}, hpTank=${tankHP}, speedMul=${speedMult.toFixed(
         2
@@ -2120,94 +2144,11 @@ export class GameScene extends Phaser.Scene {
     );
   }
 
-  private scheduleNextBurst(): void {
-    const intervalSec = Phaser.Math.Between(
-      BURST_INTERVAL_MIN_SEC,
-      BURST_INTERVAL_MAX_SEC
-    );
-    this.nextBurstTime = this.time.now + intervalSec * 1000;
-  }
-
-  private updateBurstCycle(time: number): void {
-    if (this.burstState === "idle") {
-      // Проверяем, пора ли начать burst
-      if (time >= this.nextBurstTime) {
-        this.startBurst(time);
-      }
-    } else if (this.burstState === "burst") {
-      // Проверяем, пора ли закончить burst
-      if (time >= this.burstEndTime) {
-        this.endBurst(time);
-      }
-    } else if (this.burstState === "recovery") {
-      // Проверяем, пора ли закончить recovery
-      if (time >= this.recoveryEndTime) {
-        this.endRecovery();
-      }
-    }
-  }
-
-  private startBurst(time: number): void {
-    this.burstState = "burst";
-    const durationSec = Phaser.Math.Between(
-      BURST_DURATION_MIN_SEC,
-      BURST_DURATION_MAX_SEC
-    );
-    this.burstEndTime = time + durationSec * 1000;
-
-    // Обновляем множитель спавна (не пересоздаём таймер)
-    this.spawnDelayMultiplier = this.getSpawnMultiplier();
-
-    // Немедленно применяем burst эффект: "подтягиваем" следующий спавн ближе
-    const base = this.getPhaseSettings(this.currentPhase).spawnDelayMs;
-    const mult = this.getSpawnMultiplier();
-    const desired = time + base * mult;
-    this.nextSpawnAtMs = Math.min(this.nextSpawnAtMs, desired);
-
-    // Применяем speed boost ко всем активным врагам
-    this.applyBurstSpeedToEnemies(true);
-
-    console.log(
-      `[BURST] START t=${this.stageElapsedSec.toFixed(
-        1
-      )}s duration=${durationSec.toFixed(1)}s`
-    );
-  }
-
-  private endBurst(time: number): void {
-    this.burstState = "recovery";
-    const recoverySec = Phaser.Math.Between(
-      RECOVERY_DURATION_MIN_SEC,
-      RECOVERY_DURATION_MAX_SEC
-    );
-    this.recoveryEndTime = time + recoverySec * 1000;
-
-    // Убираем speed boost
-    this.applyBurstSpeedToEnemies(false);
-
-    // Обновляем множитель спавна (не пересоздаём таймер)
-    this.spawnDelayMultiplier = this.getSpawnMultiplier();
-
-    // Немедленно применяем recovery эффект: "отодвигаем" следующий спавн дальше
-    const base = this.getPhaseSettings(this.currentPhase).spawnDelayMs;
-    const mult = this.getSpawnMultiplier();
-    const desired = time + base * mult;
-    this.nextSpawnAtMs = Math.max(this.nextSpawnAtMs, desired);
-
-    console.log(`[BURST] END`);
-  }
-
-  private endRecovery(): void {
-    this.burstState = "idle";
-    this.scheduleNextBurst();
-
-    // Обновляем множитель спавна (не пересоздаём таймер)
-    this.spawnDelayMultiplier = this.getSpawnMultiplier();
-  }
+  // Burst cycle methods removed - now handled by StageSystem
 
   private applyBurstSpeedToEnemies(apply: boolean): void {
     const children = this.enemies.getChildren();
-    const stageMult = this.getStageSpeedMultiplier(this.currentStage);
+    const stageMult = this.getStageSpeedMultiplier(this.stageSystem.getStage());
     for (let i = 0; i < children.length; i++) {
       const enemy = children[i] as Enemy;
       if (enemy && enemy.active) {
