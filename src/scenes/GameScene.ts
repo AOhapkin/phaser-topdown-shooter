@@ -4,7 +4,7 @@ import { Bullet } from "../entities/Bullet";
 import { Enemy } from "../entities/Enemy";
 import { LootPickup, LootType } from "../entities/LootPickup";
 // Weapon, BasicGun, and Shotgun moved to WeaponSystem
-import { LevelUpOption } from "../ui/LevelUpOverlay";
+// LevelUpOption import removed - now handled by PerkSystem
 import { StageSystem } from "../systems/StageSystem";
 import {
   SpawnSystem,
@@ -14,6 +14,8 @@ import { BuffSystem } from "../systems/BuffSystem";
 import { WeaponSystem } from "../systems/WeaponSystem";
 import { OverlaySystem } from "../systems/OverlaySystem";
 import { MatchStatsSystem } from "../systems/MatchStatsSystem";
+import { StageResultSystem } from "../systems/StageResultSystem";
+import { PerkSystem } from "../systems/PerkSystem";
 
 import playerSvg from "../assets/player.svg?url";
 import enemySvg from "../assets/enemy.svg?url";
@@ -188,10 +190,17 @@ export class GameScene extends Phaser.Scene {
 
   // Match stats system
   private matchStatsSystem!: MatchStatsSystem;
+
+  // Stage result system
+  private stageResultSystem!: StageResultSystem;
+
+  // Perk system
+  private perkSystem!: PerkSystem;
   private debugLogs = false; // выключить шумные логи
 
-  // Stage Clear perks
-  private playerPierceLevel = 0; // Сколько врагов может пробить пуля
+  // Stage Clear perks (moved to PerkSystem)
+  // playerPierceLevel is synced with PerkSystem via callback onPierceChanged
+  private playerPierceLevel = 0;
 
   // Weapon-drop constraints
   private lastWeaponDropTime = 0; // Time when weapon-drop was spawned or picked
@@ -334,6 +343,28 @@ export class GameScene extends Phaser.Scene {
       MIN_SPAWN_DELAY_MS
     );
 
+    // Инициализируем PerkSystem
+    this.perkSystem = new PerkSystem({
+      onPierceChanged: (level: number) => {
+        this.playerPierceLevel = level;
+      },
+      onKnockbackChanged: (multiplier: number) => {
+        this.player.increaseKnockbackMultiplier(multiplier);
+      },
+      onMagnetChanged: (multiplier: number) => {
+        this.player.increaseLootPickupRadiusMultiplier(multiplier);
+      },
+      onHealOnClear: () => {
+        this.player.applyHeal(1);
+        this.updateHealthText();
+      },
+      onBulletSizeChanged: (_multiplier: number) => {
+        // Увеличиваем размер пуль (scale)
+        // Это будет применяться при создании пуль
+        // Пока просто добавляем флаг, можно реализовать позже
+      },
+    });
+
     // Инициализируем BuffSystem
     this.buffSystem = new BuffSystem({
       getIsActive: () => {
@@ -431,8 +462,9 @@ export class GameScene extends Phaser.Scene {
       onStageStart: (_stage: number) => {
         // Logging handled in StageSystem, no duplicate here
       },
-      onStageEnd: (_stage: number, survived: boolean) => {
+      onStageEnd: (stage: number, survived: boolean) => {
         // Logging handled in StageSystem, no duplicate here
+        this.stageResultSystem.onStageEnd(stage);
         this.endStage(survived);
         this.onStageClear();
       },
@@ -459,6 +491,12 @@ export class GameScene extends Phaser.Scene {
         this.spawnSystem.onParamsChanged(this.time.now);
       },
     });
+
+    // Инициализируем StageResultSystem (after stageSystem and matchStatsSystem)
+    this.stageResultSystem = new StageResultSystem(
+      this.matchStatsSystem,
+      this.stageSystem
+    );
 
     // Группа врагов
     this.enemies = this.physics.add.group({
@@ -1426,6 +1464,7 @@ export class GameScene extends Phaser.Scene {
     this.activeBuffLoot.clear();
 
     // Печатаем статистику при Game Over
+    this.stageResultSystem.onMatchEnd(this.time.now);
     this.printMatchSummary("GAME_OVER");
 
     // Останавливаем планировщик спавна
@@ -1563,12 +1602,17 @@ export class GameScene extends Phaser.Scene {
     if (this.matchStatsSystem) {
       this.matchStatsSystem.reset(this.time.now);
     }
+
+    // Reset perk system
+    if (this.perkSystem) {
+      this.perkSystem.reset();
+      this.playerPierceLevel = 0;
+    }
   }
 
   private printMatchSummary(reason: "GAME_OVER" | "RESTART" | "MANUAL"): void {
-    // End match and get summary
-    this.matchStatsSystem.endMatch(this.time.now);
-    const summary = this.matchStatsSystem.getSummary();
+    // Get match summary from StageResultSystem
+    const summary = this.stageResultSystem.getMatchSummary();
 
     // Get current game state values
     const weaponStart =
@@ -1585,8 +1629,8 @@ export class GameScene extends Phaser.Scene {
       `Weapon: ${weaponStart} -> ${weaponCurrent} (switches: ${this.weaponSwitches})`
     );
     console.log(
-      `Shots: proj fired=${summary.shotsFiredProjectiles}, hit=${
-        summary.shotsHitProjectiles
+      `Shots: proj fired=${summary.shotsFired}, hit=${
+        summary.shotsHit
       }, acc=${summary.accuracy.toFixed(1)}%`
     );
     console.log(
@@ -1695,7 +1739,7 @@ export class GameScene extends Phaser.Scene {
       .setDepth(30001);
 
     // Получаем 3 перка для выбора
-    const perks = this.getStageClearPerks();
+    const perks = this.perkSystem.getAvailablePerks();
 
     // Адаптивный layout: вертикально на узких экранах, горизонтально на широких
     const isNarrow = width < 900;
@@ -1780,7 +1824,7 @@ export class GameScene extends Phaser.Scene {
           }
           // Логируем выбор перка
           console.log(`[PERK] picked ${perk.title}`);
-          perk.apply();
+          perk.apply(); // This calls PerkSystem.applyPerk() internally
           // Переходим к следующей стадии
           this.continueToNextStage();
         }
@@ -1799,61 +1843,7 @@ export class GameScene extends Phaser.Scene {
     this.stageClearOverlay.setScrollFactor(0);
   }
 
-  private getStageClearPerks(): LevelUpOption[] {
-    const all: LevelUpOption[] = [];
-
-    // 1) PIERCE +1
-    all.push({
-      title: "PIERCE +1",
-      description: "",
-      apply: () => {
-        this.playerPierceLevel++;
-      },
-    });
-
-    // 2) KNOCKBACK +25%
-    all.push({
-      title: "KNOCKBACK +25%",
-      description: "",
-      apply: () => {
-        this.player.increaseKnockbackMultiplier(0.25);
-      },
-    });
-
-    // 3) MAGNET +20%
-    all.push({
-      title: "MAGNET +20%",
-      description: "",
-      apply: () => {
-        this.player.increaseLootPickupRadiusMultiplier(0.2);
-      },
-    });
-
-    // 4) HEAL ON CLEAR
-    all.push({
-      title: "HEAL ON CLEAR",
-      description: "",
-      apply: () => {
-        this.player.applyHeal(1);
-        this.updateHealthText();
-      },
-    });
-
-    // 5) BULLET SIZE +30% (опционально, если нужно больше опций)
-    all.push({
-      title: "BULLET SIZE +30%",
-      description: "",
-      apply: () => {
-        // Увеличиваем размер пуль (scale)
-        // Это будет применяться при создании пуль
-        // Пока просто добавляем флаг, можно реализовать позже
-      },
-    });
-
-    // Перемешиваем и берём 3 уникальных перка
-    Phaser.Utils.Array.Shuffle(all);
-    return all.slice(0, 3);
-  }
+  // getStageClearPerks() removed - now handled by PerkSystem.getAvailablePerks()
 
   private hideStageClearOverlay(): void {
     if (this.stageClearOverlay) {
