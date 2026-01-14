@@ -1,15 +1,12 @@
 import Phaser from "phaser";
 import { Player } from "../entities/Player";
 import { Bullet } from "../entities/Bullet";
-import { Enemy, EnemyType } from "../entities/Enemy";
+import { Enemy } from "../entities/Enemy";
 import { LootPickup, LootType } from "../entities/LootPickup";
 // Weapon, BasicGun, and Shotgun moved to WeaponSystem
 // LevelUpOption import removed - now handled by PerkSystem
 import { StageSystem } from "../systems/StageSystem";
-import {
-  SpawnSystem,
-  EnemyType as SpawnEnemyType,
-} from "../systems/SpawnSystem";
+import { SpawnSystem } from "../systems/SpawnSystem";
 import { BuffSystem } from "../systems/BuffSystem";
 import { WeaponSystem } from "../systems/WeaponSystem";
 import { OverlaySystem } from "../systems/OverlaySystem";
@@ -18,9 +15,10 @@ import { StageResultSystem } from "../systems/StageResultSystem";
 import { PerkSystem } from "../systems/PerkSystem";
 import { LootDropSystem } from "../systems/LootDropSystem";
 import { EnemySystem } from "../systems/EnemySystem";
-import { ProjectileSystem } from "../systems/ProjectileSystem";
 import { CombatSystem } from "../systems/CombatSystem";
 import { PlayerStateSystem } from "../systems/PlayerStateSystem";
+import { GameContext } from "../systems/GameContext";
+import { GameSystems, GameSystemsCallbacks } from "../systems/GameSystems";
 
 import playerSvg from "../assets/player.svg?url";
 import enemySvg from "../assets/enemy.svg?url";
@@ -131,9 +129,9 @@ export class GameScene extends Phaser.Scene {
   private reloadProgressBarBg!: Phaser.GameObjects.Rectangle;
   private reloadProgressBar!: Phaser.GameObjects.Rectangle;
 
-  private gameOver = false;
+  // Match state flags moved to MatchStateSystem
+  // Legacy fields removed - use this.systems.matchStateSystem instead
   private gameOverText?: Phaser.GameObjects.Text;
-  private isStarted = false;
   private startOverlay?: Phaser.GameObjects.Rectangle;
   private startTitleText?: Phaser.GameObjects.Text;
   private startHintText?: Phaser.GameObjects.Text;
@@ -142,7 +140,6 @@ export class GameScene extends Phaser.Scene {
   // TODO: Remove after full integration
   // private suppressShootingUntil = 0;
   private isLevelUpOpen = false;
-  private isStageClear = false;
   private debugEnabled = false;
 
   // Spawn scheduler moved to SpawnSystem
@@ -158,44 +155,58 @@ export class GameScene extends Phaser.Scene {
   private currentPhase = 1;
   private phaseText?: Phaser.GameObjects.Text;
 
-  // Stage system (moved to StageSystem)
-  private stageSystem!: StageSystem;
+  // Legacy system accessors (migrate to this.systems.* gradually)
+  // Using getters to access systems from GameSystems container
+  private get stageSystem(): StageSystem {
+    return this.systems.stageSystem;
+  }
 
-  // Spawn system (moved to SpawnSystem)
-  private spawnSystem!: SpawnSystem;
+  private get spawnSystem(): SpawnSystem {
+    return this.systems.spawnSystem;
+  }
 
-  // Buff system (moved to BuffSystem)
-  private buffSystem!: BuffSystem;
+  private get buffSystem(): BuffSystem {
+    return this.systems.buffSystem;
+  }
 
-  // Weapon system (moved to WeaponSystem)
-  private weaponSystem!: WeaponSystem;
+  private get weaponSystem(): WeaponSystem {
+    return this.systems.weaponSystem;
+  }
 
-  // Overlay system
-  private overlaySystem!: OverlaySystem;
+  private get overlaySystem(): OverlaySystem {
+    return this.systems.overlaySystem;
+  }
 
-  // Match stats system
-  private matchStatsSystem!: MatchStatsSystem;
+  private get matchStatsSystem(): MatchStatsSystem {
+    return this.systems.matchStatsSystem;
+  }
 
-  // Stage result system
-  private stageResultSystem!: StageResultSystem;
+  private get stageResultSystem(): StageResultSystem {
+    return this.systems.stageResultSystem;
+  }
 
-  // Perk system
-  private perkSystem!: PerkSystem;
+  private get perkSystem(): PerkSystem {
+    return this.systems.perkSystem;
+  }
 
-  // Loot drop system
-  private lootDropSystem!: LootDropSystem;
+  private get lootDropSystem(): LootDropSystem {
+    return this.systems.lootDropSystem;
+  }
 
-  // Enemy system
-  private enemySystem!: EnemySystem;
+  private get enemySystem(): EnemySystem {
+    return this.systems.enemySystem;
+  }
 
-  // Projectile system
-  private projectileSystem!: ProjectileSystem;
+  private get combatSystem(): CombatSystem {
+    return this.systems.combatSystem;
+  }
 
-  // Combat system
-  private combatSystem!: CombatSystem;
+  private get playerStateSystem(): PlayerStateSystem {
+    return this.systems.playerStateSystem;
+  }
 
-  // Player state system
-  private playerStateSystem!: PlayerStateSystem;
+  // Game systems container
+  private systems!: GameSystems;
 
   private debugLogs = false; // выключить шумные логи
 
@@ -221,10 +232,8 @@ export class GameScene extends Phaser.Scene {
   create() {
     const { width, height } = this.scale;
 
-    // Резюмим физику и сбрасываем флаг gameOver при каждом старте/рестарте сцены
+    // Резюмим физику при каждом старте/рестарте сцены
     this.physics.resume();
-    this.gameOver = false;
-    this.isStarted = false;
 
     // Spawn system parameters are reset via spawnSystem.reset()
 
@@ -232,8 +241,7 @@ export class GameScene extends Phaser.Scene {
     this.runStartTime = 0;
     this.currentPhase = 1;
 
-    // Stage system will be initialized after this
-    this.isStageClear = false;
+    // Match state flags will be reset via systems.resetMatch()
 
     // Убираем overlay, если есть
     this.hideStageClearOverlay();
@@ -276,247 +284,11 @@ export class GameScene extends Phaser.Scene {
     this.physics.world.setBounds(0, 0, width, height);
     this.player.setCollideWorldBounds(true);
 
-    // Инициализируем PlayerStateSystem (after player is created, before PerkSystem/WeaponSystem)
-    this.playerStateSystem = new PlayerStateSystem({
-      getDebugEnabled: () => this.debugLogs,
-      log: (msg: string) => {
-        console.log(msg);
-      },
-    });
-
-    // Initialize player pickup radius from PlayerStateSystem
-    this.updatePlayerPickupRadius();
-
     // Группа пуль
     this.bullets = this.physics.add.group({
       classType: Bullet,
       runChildUpdate: false,
     });
-
-    // Инициализируем OverlaySystem
-    this.overlaySystem = new OverlaySystem();
-
-    // Инициализируем MatchStatsSystem
-    this.matchStatsSystem = new MatchStatsSystem();
-
-    // Инициализируем статистику (weaponSystem будет инициализирован после)
-    this.resetMatchStats();
-
-    // Инициализируем SpawnSystem
-    this.spawnSystem = new SpawnSystem(
-      this,
-      {
-        getIsActive: () => {
-          return this.isStarted && !this.gameOver && !this.isStageClear;
-        },
-        getCurrentPhase: () => this.currentPhase,
-        getPhaseSettings: (phase: number) => this.getPhaseSettings(phase),
-        getBurstState: () => this.stageSystem.getBurstState(),
-        getSpawnDelayMultiplier: () => this.getSpawnMultiplier(),
-        getEffectiveWeights: (settings, burstState) => {
-          let runnerWeight = settings.weights.runner;
-          let tankWeight = settings.weights.tank;
-
-          // Применяем stage modifier для веса танков
-          tankWeight = Math.round(
-            tankWeight *
-              this.getStageTankWeightMultiplier(this.stageSystem.getStage())
-          );
-
-          // Во время burst увеличиваем вес runner
-          if (burstState === "burst") {
-            runnerWeight = Math.round(runnerWeight * BURST_RUNNER_WEIGHT_BOOST);
-          }
-
-          return { runner: runnerWeight, tank: tankWeight };
-        },
-        getAliveEnemiesCount: () => this.enemySystem.getAliveCount(),
-        getAliveTanksCount: () => this.enemySystem.getTankAliveCount(),
-        spawnEnemy: (chosenType: SpawnEnemyType) => {
-          this.enemySystem.spawn(chosenType);
-        },
-        logSpawnDebug: (msg: string) => {
-          if (this.debugLogs) {
-            console.log(msg);
-          }
-        },
-      },
-      MIN_SPAWN_DELAY_MS
-    );
-
-    // Инициализируем PerkSystem
-    this.perkSystem = new PerkSystem({
-      onPierceChanged: (level: number) => {
-        // Use PlayerStateSystem as source of truth for pierce
-        // PerkSystem calls this with the new level, but we track increments
-        // So we calculate the difference and add it
-        const currentPierce = this.playerStateSystem.getPierceBonus();
-        const delta = level - currentPierce;
-        if (delta > 0) {
-          this.playerStateSystem.addPierce(delta);
-        }
-      },
-      onKnockbackChanged: (_multiplier: number) => {
-        // Use PlayerStateSystem as source of truth for knockback
-        // multiplier = 0.25 means +25%, so mult = 1.25
-        this.playerStateSystem.mulKnockback(1.25);
-      },
-      onMagnetChanged: (_multiplier: number) => {
-        // Use PlayerStateSystem as source of truth for magnet
-        // multiplier = 0.2 means +20%, so mult = 1.2
-        this.playerStateSystem.mulMagnet(1.2);
-        // Update player's pickup radius to match PlayerStateSystem
-        this.updatePlayerPickupRadius();
-      },
-      onHealOnClear: () => {
-        // Use PlayerStateSystem as source of truth for heal on clear
-        // Enable the perk, healing will happen on stage clear
-        this.playerStateSystem.enableHealOnClear();
-      },
-      onBulletSizeChanged: (_multiplier: number) => {
-        // Use PlayerStateSystem as source of truth for bullet size
-        // multiplier = 0.3 means +30%, so mult = 1.3
-        this.playerStateSystem.mulBulletSize(1.3);
-      },
-    });
-
-    // Инициализируем BuffSystem
-    this.buffSystem = new BuffSystem({
-      getIsActive: () => {
-        return this.isStarted && !this.gameOver && !this.isStageClear;
-      },
-      getTimeNow: () => this.time.now,
-      getEnemies: () => {
-        if (!this.enemies) {
-          return [];
-        }
-        try {
-          const children = this.enemies.getChildren();
-          if (children && Array.isArray(children)) {
-            return children.filter(
-              (obj) => obj && (obj as Enemy).active
-            ) as Enemy[];
-          }
-        } catch (e) {
-          // Group not fully initialized
-        }
-        return [];
-      },
-      onReloadBypassEnabled: (enabled: boolean) => {
-        // DOUBLE buff: reload bypass is handled via bypassAmmo in WeaponSystem
-        // This callback is called for logging purposes
-        if (enabled) {
-          // Log is already done in startBuff
-        } else {
-          // DOUBLE ended: restore normal ammo behavior
-          // This is handled by WeaponSystem internally
-        }
-      },
-      onRapidFireMultiplierChanged: (_mult: number) => {
-        // RAPID buff: fire rate multiplier is handled in WeaponSystem.tryShoot()
-        // This callback is called for potential future use
-        // Currently, rapid is checked via buffSystem.isActive("rapid") in WeaponSystem
-      },
-      applyFreezeToEnemy: (enemy: Enemy) => {
-        enemy.setFrozen(true);
-      },
-      removeFreezeFromEnemy: (enemy: Enemy) => {
-        enemy.setFrozen(false);
-      },
-      isEnemyFreezable: (enemy: Enemy) => {
-        // Check if enemy is not dying
-        const isDying = (enemy as any).isDying;
-        return !isDying;
-      },
-      log: (msg: string) => {
-        console.log(msg);
-      },
-    });
-
-    // Инициализируем WeaponSystem
-    this.weaponSystem = new WeaponSystem({
-      getIsActive: () => {
-        return (
-          !this.gameOver &&
-          this.player.isAlive() &&
-          this.isStarted &&
-          !this.isLevelUpOpen &&
-          !this.isStageClear
-        );
-      },
-      getTimeNow: () => this.time.now,
-      getPlayerPos: () => ({ x: this.player.x, y: this.player.y }),
-      getAimAngle: () => {
-        const pointer = this.input.activePointer;
-        return Phaser.Math.Angle.Between(
-          this.player.x,
-          this.player.y,
-          pointer.worldX,
-          pointer.worldY
-        );
-      },
-      isBuffActive: (type: "rapid" | "double") => {
-        return this.buffSystem.isActive(type);
-      },
-      canBypassReload: () => {
-        return this.buffSystem.isActive("double");
-      },
-      getScene: () => this,
-      getBulletsGroup: () => this.bullets,
-      getPlayerPierceLevel: () => this.playerStateSystem.getPierceBonus(),
-      getPlayerStateSystem: () => this.playerStateSystem,
-      scheduleDelayedCall: (delayMs: number, callback: () => void) => {
-        this.time.delayedCall(delayMs, callback);
-      },
-      onShotFired: (projectilesCount: number) => {
-        this.matchStatsSystem.onShotFired(projectilesCount);
-      },
-    });
-
-    // Инициализируем StageSystem
-    this.stageSystem = new StageSystem(this, {
-      onStageStart: (_stage: number) => {
-        // Logging handled in StageSystem, no duplicate here
-      },
-      onStageEnd: (stage: number, survived: boolean) => {
-        // Logging handled in StageSystem, no duplicate here
-        this.stageResultSystem.onStageEnd(stage);
-        this.endStage(survived);
-        this.onStageClear();
-      },
-      onBurstStart: (stageElapsedSec: number, durationSec: number) => {
-        console.log(
-          `[BURST] START t=${stageElapsedSec.toFixed(
-            1
-          )}s duration=${durationSec.toFixed(1)}s`
-        );
-        // Обновляем таймер спавна при изменении burst state
-        this.spawnSystem.onParamsChanged(this.time.now);
-        // Применяем speed boost ко всем активным врагам
-        this.enemySystem.applySpeedMultiplier(BURST_SPEED_BOOST);
-      },
-      onBurstEnd: () => {
-        console.log(`[BURST] END`);
-        // Убираем speed boost
-        this.enemySystem.applySpeedMultiplier(1.0);
-        // Обновляем таймер спавна при изменении burst state
-        this.spawnSystem.onParamsChanged(this.time.now);
-      },
-      onBurstStateChanged: (_state) => {
-        // Обновляем таймер спавна при изменении состояния burst
-        this.spawnSystem.onParamsChanged(this.time.now);
-      },
-    });
-
-    // Инициализируем StageResultSystem (after stageSystem and matchStatsSystem)
-    this.stageResultSystem = new StageResultSystem(
-      this.matchStatsSystem,
-      this.stageSystem
-    );
-
-    // Инициализируем LootDropSystem (after loot group is created)
-    // Note: loot group will be created below, so we initialize LootDropSystem after it
-    // Actually, we need to initialize it after loot group is created, so let's do it after loot group
 
     // Группа врагов
     this.enemies = this.physics.add.group({
@@ -524,61 +296,12 @@ export class GameScene extends Phaser.Scene {
       runChildUpdate: true,
     });
 
-    // Инициализируем CombatSystem (before ProjectileSystem and EnemySystem)
-    this.combatSystem = new CombatSystem({
-      getIsActive: () => {
-        return this.isStarted && !this.gameOver && !this.isStageClear;
-      },
-      getPlayer: () => this.player,
-      getTimeNow: () => this.time.now,
-      getPlayerStateSystem: () => this.playerStateSystem,
-      onEnemyKilled: (type: "runner" | "tank") => {
-        this.matchStatsSystem.onEnemyKilled(type);
-      },
-      onEnemyKilledTotalOnly: () => {
-        this.matchStatsSystem.onEnemyKilledTotalOnly();
-      },
-      onPlayerDamaged: (amount: number) => {
-        this.matchStatsSystem.onPlayerDamaged(amount);
-        this.updateHealthText();
-      },
-      onEnemyKilledCallback: (enemy: Enemy) => {
-        // Update score UI from MatchStatsSystem
-        const summary = this.matchStatsSystem.getSummary();
-        this.score = summary.score;
-        this.scoreText.setText(`Score: ${this.score}`);
-
-        this.addXP(1);
-        this.maybeDropLoot(enemy.x, enemy.y);
-        // Weapon-drop spawn with constraints
-        this.lootDropSystem.maybeSpawnWeaponLoot(enemy.x, enemy.y);
-        // Buff loot spawn
-        this.lootDropSystem.maybeSpawnBuffLoot(enemy.x, enemy.y);
-      },
-      pausePhysics: () => {
-        this.physics.pause();
-      },
-      resumePhysics: (delayMs: number) => {
-        this.time.delayedCall(delayMs, () => {
-          this.physics.resume();
-        });
-      },
+    this.loot = this.physics.add.group({
+      classType: LootPickup,
+      runChildUpdate: false,
     });
 
-    // Инициализируем ProjectileSystem (after bullets, enemies groups and CombatSystem are created)
-    this.projectileSystem = new ProjectileSystem({
-      getIsActive: () => {
-        return this.isStarted && !this.gameOver && !this.isStageClear;
-      },
-      getScene: () => this,
-      getBulletsGroup: () => this.bullets,
-      getEnemiesGroup: () => this.enemies,
-      getCombatSystem: () => this.combatSystem,
-      onProjectileHit: () => {
-        this.matchStatsSystem.onProjectileHit();
-      },
-    });
-
+    // Create player-enemies overlap
     this.physics.add.overlap(
       this.player,
       this.enemies,
@@ -588,68 +311,7 @@ export class GameScene extends Phaser.Scene {
       this
     );
 
-    // Инициализируем EnemySystem (after enemies group and player are created)
-    this.enemySystem = new EnemySystem({
-      getIsActive: () => {
-        return this.isStarted && !this.gameOver && !this.isStageClear;
-      },
-      getScene: () => this,
-      getEnemiesGroup: () => this.enemies,
-      getPlayer: () => this.player,
-      getPlayerPos: () => ({ x: this.player.x, y: this.player.y }),
-      onEnemyHitPlayer: (enemy: Enemy) => {
-        // Delegate to CombatSystem
-        if (this.isStageClear) {
-          return;
-        }
-
-        this.combatSystem.onEnemyHitPlayer(enemy);
-
-        if (!this.player.isAlive()) {
-          this.handleGameOver();
-        }
-      },
-      onEnemyKilled: (type: EnemyType) => {
-        if (type === "runner" || type === "tank") {
-          this.matchStatsSystem.onEnemyKilled(type);
-        } else {
-          this.matchStatsSystem.onEnemyKilledTotalOnly();
-        }
-      },
-      isBurstActive: () => {
-        return this.stageSystem.getBurstState() === "burst";
-      },
-      getBurstSpeedMultiplier: () => {
-        return BURST_SPEED_BOOST;
-      },
-      isFreezeActive: () => {
-        return this.buffSystem.isActive("freeze");
-      },
-      applyFreezeToEnemy: (enemy: Enemy) => {
-        enemy.setFrozen(true);
-      },
-      getStageSpeedMultiplier: (stage: number) => {
-        return this.getStageSpeedMultiplier(stage);
-      },
-      getCurrentPhase: () => {
-        return this.currentPhase;
-      },
-      getPhaseSettings: (phase: number) => {
-        return this.getPhaseSettings(phase);
-      },
-      getStage: () => {
-        return this.stageSystem.getStage();
-      },
-      getEnemySpeedMultiplier: () => {
-        return this.enemySpeedMultiplier;
-      },
-    });
-
-    this.loot = this.physics.add.group({
-      classType: LootPickup,
-      runChildUpdate: false,
-    });
-
+    // Create player-loot overlap
     this.physics.add.overlap(
       this.player,
       this.loot,
@@ -659,32 +321,113 @@ export class GameScene extends Phaser.Scene {
       this
     );
 
-    // Инициализируем LootDropSystem (after loot group is created)
-    this.lootDropSystem = new LootDropSystem({
-      getIsActive: () => {
-        return this.isStarted && !this.gameOver && !this.isStageClear;
-      },
+    // Create GameContext with getters that read fresh values from GameScene
+    // Note: matchStateSystem will be set after systems are created
+    const ctx: GameContext = {
+      scene: this,
+      player: this.player,
+      bulletsGroup: this.bullets,
+      enemiesGroup: this.enemies,
+      lootGroup: this.loot,
+      getMatchStateSystem: () => this.systems.matchStateSystem,
       getTimeNow: () => this.time.now,
-      getPlayerPos: () => ({ x: this.player.x, y: this.player.y }),
-      getScene: () => this,
-      getLootGroup: () => this.loot,
-      isBuffActive: (type: "rapid" | "double" | "freeze") => {
-        return this.buffSystem.isActive(type);
+      getIsActive: () => {
+        const state = this.systems.matchStateSystem;
+        return (
+          state.isStarted() && !state.isGameOver() && !state.isStageClear()
+        );
       },
-      isWeaponDropAllowed: () => {
-        // Check if weapon drop is allowed (same logic as before)
-        return !this.hasLootOfType("weapon-drop");
+      getIsStarted: () => this.systems.matchStateSystem.isStarted(),
+      getIsGameOver: () => this.systems.matchStateSystem.isGameOver(),
+      getIsStageClear: () => this.systems.matchStateSystem.isStageClear(),
+      debugEnabled: () => this.debugLogs,
+      log: (msg: string) => console.log(msg),
+    };
+
+    // Create GameSystems with callbacks
+    const systemsCallbacks: GameSystemsCallbacks = {
+      getIsStarted: () => this.systems.matchStateSystem.isStarted(),
+      getGameOver: () => this.systems.matchStateSystem.isGameOver(),
+      getIsStageClear: () => this.systems.matchStateSystem.isStageClear(),
+      getIsLevelUpOpen: () => this.isLevelUpOpen,
+      getCurrentPhase: () => this.currentPhase,
+      getPhaseSettings: (phase: number) => this.getPhaseSettings(phase),
+      getBurstState: () => this.stageSystem.getBurstState(),
+      getSpawnDelayMultiplier: () => this.getSpawnMultiplier(),
+      getEffectiveWeights: (settings, burstState) => {
+        let runnerWeight = settings.weights.runner;
+        let tankWeight = settings.weights.tank;
+        tankWeight = Math.round(
+          tankWeight *
+            this.getStageTankWeightMultiplier(this.stageSystem.getStage())
+        );
+        if (burstState === "burst") {
+          runnerWeight = Math.round(runnerWeight * BURST_RUNNER_WEIGHT_BOOST);
+        }
+        return { runner: runnerWeight, tank: tankWeight };
       },
-      onBuffPicked: (type: "rapid" | "double" | "freeze") => {
-        this.buffSystem.startBuff(type);
+      getStageTankWeightMultiplier: (stage: number) =>
+        this.getStageTankWeightMultiplier(stage),
+      getStageSpeedMultiplier: (stage: number) =>
+        this.getStageSpeedMultiplier(stage),
+      getEnemySpeedMultiplier: () => this.enemySpeedMultiplier,
+      setEnemySpeedMultiplier: (mult: number) => {
+        this.enemySpeedMultiplier = mult;
       },
-      onWeaponDropPicked: () => {
-        this.onWeaponDropPicked();
+      getAimAngle: () => {
+        const pointer = this.input.activePointer;
+        return Phaser.Math.Angle.Between(
+          this.player.x,
+          this.player.y,
+          pointer.worldX,
+          pointer.worldY
+        );
       },
-      log: (msg: string) => {
-        console.log(msg);
+      getScore: () => this.score,
+      setScore: (score: number) => {
+        this.score = score;
       },
-    });
+      updateHealthText: () => this.updateHealthText(),
+      updateScoreText: (score: number) => {
+        this.scoreText.setText(`Score: ${score}`);
+      },
+      addXP: (amount: number) => this.addXP(amount),
+      maybeDropLoot: (x: number, y: number) => this.maybeDropLoot(x, y),
+      pausePhysics: () => this.physics.pause(),
+      resumePhysics: (delayMs: number) => {
+        this.time.delayedCall(delayMs, () => {
+          this.physics.resume();
+        });
+      },
+      onStageEnd: (stage: number, survived: boolean) => {
+        this.stageResultSystem.onStageEnd(stage);
+        this.endStage(survived);
+        this.onStageClear();
+      },
+      onBurstStart: (_stageElapsedSec: number, _durationSec: number) => {
+        // Burst logging handled in StageSystem via ctx.log
+        this.spawnSystem.onParamsChanged(this.time.now);
+        this.enemySystem.applySpeedMultiplier(BURST_SPEED_BOOST);
+      },
+      onBurstEnd: () => {
+        // Burst logging handled in StageSystem via ctx.log
+        this.enemySystem.applySpeedMultiplier(1.0);
+        this.spawnSystem.onParamsChanged(this.time.now);
+      },
+      onBurstStateChanged: (_state) => {
+        this.spawnSystem.onParamsChanged(this.time.now);
+      },
+      updatePlayerPickupRadius: () => this.updatePlayerPickupRadius(),
+      hasLootOfType: (type: string) => !this.hasLootOfType(type as LootType),
+      onWeaponDropPicked: () => this.onWeaponDropPicked(),
+      log: (msg: string) => console.log(msg),
+    };
+
+    // Create GameSystems container
+    this.systems = new GameSystems(ctx, systemsCallbacks);
+
+    // Initialize systems (create overlaps, etc.)
+    this.systems.init();
 
     // UI: score и здоровье (score managed by MatchStatsSystem)
     this.score = 0;
@@ -756,7 +499,7 @@ export class GameScene extends Phaser.Scene {
     this.reloadProgressBar.setVisible(false);
 
     // Стартовый экран: оверлей + title + мерцающий hint
-    this.isStarted = false;
+    this.systems.matchStateSystem.setStarted(false);
     this.overlaySystem.open("start");
 
     this.startOverlay = this.add
@@ -814,14 +557,14 @@ export class GameScene extends Phaser.Scene {
   }
 
   update(time: number) {
-    if (this.gameOver) {
+    if (this.systems.matchStateSystem.isGameOver()) {
       if (Phaser.Input.Keyboard.JustDown(this.restartKey)) {
         this.scene.restart();
       }
       return;
     }
 
-    if (!this.isStarted) {
+    if (!this.systems.matchStateSystem.isStarted()) {
       return;
     }
 
@@ -829,7 +572,7 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    if (this.isStageClear) {
+    if (this.systems.matchStateSystem.isStageClear()) {
       // Проверяем Enter для продолжения
       if (Phaser.Input.Keyboard.JustDown(this.continueKey)) {
         this.continueToNextStage();
@@ -854,31 +597,19 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
-    // Обновление stage system
-    if (this.isStarted && !this.gameOver) {
-      this.stageSystem.update(time);
+    // Update all systems via GameSystems container
+    if (this.systems) {
+      this.systems.update(time);
     }
-    this.buffSystem.update();
+
     this.updateBuffHud(time);
 
-    // Update projectile system
-    if (this.projectileSystem) {
-      this.projectileSystem.update();
-    }
-
-    // Clean up inactive buff loot from tracking
-    // Clean up expired buff loot items (handled by LootDropSystem)
-    if (this.lootDropSystem) {
-      this.lootDropSystem.cleanupExpiredBuffLoot();
-    }
-
-    if (this.player && !this.isStageClear) {
+    if (this.player && !this.systems.matchStateSystem.isStageClear()) {
       this.player.update();
     }
 
-    if (!this.isStageClear) {
-      // Update weapon system
-      this.weaponSystem.update();
+    if (!this.systems.matchStateSystem.isStageClear()) {
+      // Weapon system update is handled by GameSystems.update()
 
       // Guard: block gameplay input when overlay is open
       if (!this.overlaySystem.isBlockingInput()) {
@@ -915,7 +646,7 @@ export class GameScene extends Phaser.Scene {
       | Phaser.Types.Physics.Arcade.GameObjectWithBody
       | Phaser.Tilemaps.Tile
   ): void {
-    if (this.isStageClear) {
+    if (this.systems.matchStateSystem.isStageClear()) {
       return;
     }
 
@@ -1181,7 +912,7 @@ export class GameScene extends Phaser.Scene {
       | Phaser.Types.Physics.Arcade.GameObjectWithBody
       | Phaser.Tilemaps.Tile
   ) {
-    if (this.isStageClear) {
+    if (this.systems.matchStateSystem.isStageClear()) {
       return;
     }
 
@@ -1305,11 +1036,11 @@ export class GameScene extends Phaser.Scene {
   }
 
   private handleGameOver() {
-    if (this.gameOver) {
+    if (this.systems.matchStateSystem.isGameOver()) {
       return;
     }
 
-    this.gameOver = true;
+    this.systems.matchStateSystem.setGameOver(true);
     this.overlaySystem.open("gameover");
 
     // Clear buff loot tracking on game over (handled by LootDropSystem.reset())
@@ -1339,7 +1070,10 @@ export class GameScene extends Phaser.Scene {
   }
 
   private startGameFromOverlay() {
-    if (this.isStarted || this.gameOver) {
+    if (
+      this.systems.matchStateSystem.isStarted() ||
+      this.systems.matchStateSystem.isGameOver()
+    ) {
       return;
     }
 
@@ -1349,7 +1083,7 @@ export class GameScene extends Phaser.Scene {
     // Блокируем стрельбу на короткое время после старта
     this.weaponSystem.setSuppressShootingUntil(this.time.now + 200);
 
-    this.isStarted = true;
+    this.systems.matchStateSystem.setStarted(true);
     this.overlaySystem.close();
 
     // Устанавливаем время начала забега
@@ -1423,43 +1157,11 @@ export class GameScene extends Phaser.Scene {
     });
   }
 
-  private resetMatchStats(): void {
-    // Close any open overlays on restart
-    if (this.overlaySystem) {
-      this.overlaySystem.close();
-    }
-
-    // Clear all buffs and unfreeze enemies on restart
-    if (this.buffSystem) {
-      this.buffSystem.reset();
-    }
-    this.enemySpeedMultiplier = 1.0;
-    // Freeze removal is handled by buffSystem.reset()
-    // Reset stage system
-    if (this.stageSystem) {
-      this.stageSystem.reset(this.time.now);
-    }
-
-    // Reset loot drop system
-    if (this.lootDropSystem) {
-      this.lootDropSystem.reset();
-    }
-
-    // Reset match stats
-    if (this.matchStatsSystem) {
-      this.matchStatsSystem.reset(this.time.now);
-    }
-
-    // Reset perk system
-    if (this.perkSystem) {
-      this.perkSystem.reset();
-    }
-
-    // Reset player state system
-    if (this.playerStateSystem) {
-      this.playerStateSystem.reset();
-      // Update player pickup radius after reset
-      this.updatePlayerPickupRadius();
+  resetMatchStats(): void {
+    // Use GameSystems.resetMatch() to reset all systems in correct order
+    if (this.systems) {
+      this.enemySpeedMultiplier = 1.0;
+      this.systems.resetMatch();
     }
   }
 
@@ -1508,11 +1210,12 @@ export class GameScene extends Phaser.Scene {
 
   private onStageClear(): void {
     // Clear buff loot tracking on stage clear (handled by LootDropSystem)
-    if (this.gameOver || !this.isStarted || this.isStageClear) {
+    const state = this.systems.matchStateSystem;
+    if (state.isGameOver() || !state.isStarted() || state.isStageClear()) {
       return;
     }
 
-    this.isStageClear = true;
+    this.systems.matchStateSystem.setStageClear(true);
     this.overlaySystem.open("stageclear");
 
     // Останавливаем спавн
@@ -1547,7 +1250,7 @@ export class GameScene extends Phaser.Scene {
     // Показываем overlay
     this.showStageClearOverlay();
 
-    console.log(`[STAGE] CLEAR stage=${this.stageSystem.getStage()}`);
+    // Stage clear logging handled in StageSystem via ctx.log
   }
 
   private showStageClearOverlay(): void {
@@ -1675,8 +1378,7 @@ export class GameScene extends Phaser.Scene {
           if (event?.stopPropagation) {
             event.stopPropagation();
           }
-          // Логируем выбор перка
-          console.log(`[PERK] picked ${perk.title}`);
+          // Perk logging handled in PerkSystem via ctx.log
           this.perkSystem.apply(perk.id);
           // Переходим к следующей стадии
           this.continueToNextStage();
@@ -1714,11 +1416,11 @@ export class GameScene extends Phaser.Scene {
   }
 
   private continueToNextStage(): void {
-    if (!this.isStageClear) {
+    if (!this.systems.matchStateSystem.isStageClear()) {
       return;
     }
 
-    this.isStageClear = false;
+    this.systems.matchStateSystem.setStageClear(false);
     this.overlaySystem.close();
     this.hideStageClearOverlay();
 

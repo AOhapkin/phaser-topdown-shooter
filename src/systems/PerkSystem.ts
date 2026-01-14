@@ -13,6 +13,7 @@ export interface PerkSystemCallbacks {
   onMagnetChanged: (multiplier: number) => void;
   onHealOnClear: () => void;
   onBulletSizeChanged: (multiplier: number) => void;
+  log?: (msg: string) => void;
 }
 
 /**
@@ -124,6 +125,9 @@ export class PerkSystem {
 
     // Increase level
     this.levels[id]++;
+
+    // Log perk selection
+    this.callbacks.log?.(`[PERK] picked ${def.title}`);
 
     // Apply effect through callbacks
     switch (id) {

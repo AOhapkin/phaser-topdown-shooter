@@ -17,6 +17,7 @@ export interface StageSystemCallbacks {
   onBurstStart: (stageElapsedSec: number, durationSec: number) => void;
   onBurstEnd: () => void;
   onBurstStateChanged: (state: BurstState) => void;
+  log?: (msg: string) => void;
 }
 
 export class StageSystem {
@@ -42,7 +43,7 @@ export class StageSystem {
     this.burstState = "idle";
     this.scheduleNextBurst(timeMs);
     // Logging: StageSystem is the single source of truth for stage logs
-    console.log(`[STAGE] START stage=${this.currentStage} duration=${STAGE_DURATION_SEC}s`);
+    this.callbacks.log?.(`[STAGE] START stage=${this.currentStage} duration=${STAGE_DURATION_SEC}s`);
     this.callbacks.onStageStart(this.currentStage);
   }
 
@@ -57,7 +58,7 @@ export class StageSystem {
     // Проверяем завершение стадии
     if (this.stageElapsedSec >= STAGE_DURATION_SEC) {
       // Logging: StageSystem is the single source of truth for stage logs
-      console.log(`[STAGE] END stage=${this.currentStage} survived=true`);
+      this.callbacks.log?.(`[STAGE] END stage=${this.currentStage} survived=true`);
       this.callbacks.onStageEnd(this.currentStage, true);
       // StageSystem сам инкрементирует стадию
       this.currentStage++;
@@ -66,7 +67,7 @@ export class StageSystem {
       this.burstState = "idle";
       this.scheduleNextBurst(timeMs);
       // Logging: StageSystem is the single source of truth for stage logs
-      console.log(`[STAGE] START stage=${this.currentStage} duration=${STAGE_DURATION_SEC}s`);
+      this.callbacks.log?.(`[STAGE] START stage=${this.currentStage} duration=${STAGE_DURATION_SEC}s`);
       this.callbacks.onStageStart(this.currentStage);
       return;
     }
