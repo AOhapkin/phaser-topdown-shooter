@@ -2,6 +2,7 @@ import { Weapon, WeaponKey } from "../weapons/types";
 import { BasicGun } from "../weapons/BasicGun";
 import { Shotgun } from "../weapons/Shotgun";
 import { Bullet } from "../entities/Bullet";
+import { PlayerStateSystem } from "./PlayerStateSystem";
 import Phaser from "phaser";
 
 export type WeaponId = "PISTOL" | "SHOTGUN";
@@ -16,6 +17,7 @@ export interface WeaponSystemCallbacks {
   getScene: () => Phaser.Scene;
   getBulletsGroup: () => Phaser.Physics.Arcade.Group;
   getPlayerPierceLevel: () => number; // pierce level from Stage Clear perk
+  getPlayerStateSystem: () => PlayerStateSystem; // for bullet size and other player state
   scheduleDelayedCall: (delayMs: number, callback: () => void) => void;
   onShotFired: (count: number) => void; // for match stats
   onShotHit?: () => void; // for match stats (optional)
@@ -140,6 +142,7 @@ export class WeaponSystem {
     const scene = this.callbacks.getScene();
     const bullets = this.callbacks.getBulletsGroup();
     const pierceLevel = this.callbacks.getPlayerPierceLevel();
+    const bulletSizeMult = this.callbacks.getPlayerStateSystem().getBulletSizeMultiplier();
 
     // First shot: use weapon.tryFire (handles ammo, reload, fireRate update)
     this.currentWeapon.tryFire({
@@ -156,6 +159,13 @@ export class WeaponSystem {
         // Apply pierce perk to bullet (only from Stage Clear perk)
         if (pierceLevel > 0) {
           bullet.pierceLeft = pierceLevel;
+        }
+        // Apply bullet size perk
+        if (bulletSizeMult !== 1.0) {
+          bullet.setScale(bulletSizeMult);
+          // Update hitbox size proportionally (base radius is 4)
+          const body = bullet.body as Phaser.Physics.Arcade.Body;
+          body.setCircle(4 * bulletSizeMult);
         }
       },
     });
@@ -187,6 +197,12 @@ export class WeaponSystem {
               if (pierceLevel > 0) {
                 bullet.pierceLeft = pierceLevel;
               }
+              // Apply bullet size perk
+              if (bulletSizeMult !== 1.0) {
+                bullet.setScale(bulletSizeMult);
+                const body = bullet.body as Phaser.Physics.Arcade.Body;
+                body.setCircle(4 * bulletSizeMult);
+              }
             },
           });
         });
@@ -203,6 +219,12 @@ export class WeaponSystem {
         // Apply pierce perk (only from Stage Clear perk)
         if (pierceLevel > 0) {
           bullet.pierceLeft = pierceLevel;
+        }
+        // Apply bullet size perk
+        if (bulletSizeMult !== 1.0) {
+          bullet.setScale(bulletSizeMult);
+          const body = bullet.body as Phaser.Physics.Arcade.Body;
+          body.setCircle(4 * bulletSizeMult);
         }
 
         // Set velocity

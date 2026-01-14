@@ -40,7 +40,9 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
   // TODO: Remove after full migration to PlayerStateSystem
   // @deprecated Use PlayerStateSystem.getKnockbackMultiplier() instead
   private knockbackMultiplier = 1.0; // Fallback for backward compatibility (used only if no multiplier passed to applyKnockback)
-  private lootPickupRadiusMultiplier = 1.0; // Умножает радиус подбора лута
+  // TODO: Remove after full migration to PlayerStateSystem
+  // @deprecated Use PlayerStateSystem.getMagnetMultiplier() instead
+  private lootPickupRadiusMultiplier = 1.0; // Fallback for backward compatibility (magnet now managed by PlayerStateSystem)
 
   constructor(scene: Phaser.Scene, x: number, y: number) {
     super(scene, x, y, "player");
@@ -116,12 +118,18 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
     // No-op: knockback is now managed by PlayerStateSystem
   }
 
+  // TODO: Remove after full migration to PlayerStateSystem
+  // @deprecated Use PlayerStateSystem.getMagnetMultiplier() instead
   public getLootPickupRadiusMultiplier(): number {
     return this.lootPickupRadiusMultiplier;
   }
 
-  public increaseLootPickupRadiusMultiplier(amount: number): void {
-    this.lootPickupRadiusMultiplier += amount;
+  // TODO: Remove after full migration to PlayerStateSystem
+  // @deprecated Use PlayerStateSystem.mulMagnet() instead
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  // @ts-ignore - kept for backward compatibility
+  public increaseLootPickupRadiusMultiplier(_amount: number): void {
+    // No-op: magnet is now managed by PlayerStateSystem
   }
 
   public getIFramesMs(): number {

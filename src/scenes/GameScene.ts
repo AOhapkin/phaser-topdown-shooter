@@ -284,6 +284,9 @@ export class GameScene extends Phaser.Scene {
       },
     });
 
+    // Initialize player pickup radius from PlayerStateSystem
+    this.updatePlayerPickupRadius();
+
     // Группа пуль
     this.bullets = this.physics.add.group({
       classType: Bullet,
@@ -358,17 +361,22 @@ export class GameScene extends Phaser.Scene {
         // multiplier = 0.25 means +25%, so mult = 1.25
         this.playerStateSystem.mulKnockback(1.25);
       },
-      onMagnetChanged: (multiplier: number) => {
-        this.player.increaseLootPickupRadiusMultiplier(multiplier);
+      onMagnetChanged: (_multiplier: number) => {
+        // Use PlayerStateSystem as source of truth for magnet
+        // multiplier = 0.2 means +20%, so mult = 1.2
+        this.playerStateSystem.mulMagnet(1.2);
+        // Update player's pickup radius to match PlayerStateSystem
+        this.updatePlayerPickupRadius();
       },
       onHealOnClear: () => {
-        this.player.applyHeal(1);
-        this.updateHealthText();
+        // Use PlayerStateSystem as source of truth for heal on clear
+        // Enable the perk, healing will happen on stage clear
+        this.playerStateSystem.enableHealOnClear();
       },
       onBulletSizeChanged: (_multiplier: number) => {
-        // Увеличиваем размер пуль (scale)
-        // Это будет применяться при создании пуль
-        // Пока просто добавляем флаг, можно реализовать позже
+        // Use PlayerStateSystem as source of truth for bullet size
+        // multiplier = 0.3 means +30%, so mult = 1.3
+        this.playerStateSystem.mulBulletSize(1.3);
       },
     });
 
@@ -456,6 +464,7 @@ export class GameScene extends Phaser.Scene {
       getScene: () => this,
       getBulletsGroup: () => this.bullets,
       getPlayerPierceLevel: () => this.playerStateSystem.getPierceBonus(),
+      getPlayerStateSystem: () => this.playerStateSystem,
       scheduleDelayedCall: (delayMs: number, callback: () => void) => {
         this.time.delayedCall(delayMs, callback);
       },
@@ -924,6 +933,25 @@ export class GameScene extends Phaser.Scene {
     const hp = this.player?.getHealth?.() ?? 0;
     const maxHp = this.player?.getMaxHealth?.() ?? 0;
     this.healthText.setText(`HP: ${hp}/${maxHp}`);
+  }
+
+  /**
+   * Update player's pickup radius based on PlayerStateSystem magnet multiplier
+   * This affects loot pickup overlap detection
+   */
+  private updatePlayerPickupRadius(): void {
+    if (!this.player || !this.playerStateSystem) {
+      return;
+    }
+    const playerBody = this.player.body as Phaser.Physics.Arcade.Body;
+    if (!playerBody) {
+      return;
+    }
+    // Base radius for loot pickup overlap (player's default collision radius)
+    const baseRadius = 16;
+    const magnetMult = this.playerStateSystem.getMagnetMultiplier();
+    // Update collision radius to increase loot pickup range
+    playerBody.setCircle(baseRadius * magnetMult);
   }
 
   private getElapsedSec(): number {
@@ -1430,6 +1458,8 @@ export class GameScene extends Phaser.Scene {
     // Reset player state system
     if (this.playerStateSystem) {
       this.playerStateSystem.reset();
+      // Update player pickup radius after reset
+      this.updatePlayerPickupRadius();
     }
   }
 
@@ -1505,6 +1535,13 @@ export class GameScene extends Phaser.Scene {
         const enemyBody = enemy.body as Phaser.Physics.Arcade.Body;
         enemyBody.setVelocity(0, 0);
       }
+    }
+
+    // Apply heal on clear perk if enabled
+    if (this.playerStateSystem.hasHealOnClear()) {
+      this.player.applyHeal(1);
+      this.matchStatsSystem.onPlayerHealed(1);
+      this.updateHealthText();
     }
 
     // Показываем overlay
