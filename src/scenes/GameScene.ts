@@ -18,6 +18,9 @@ import { StageResultSystem } from "../systems/StageResultSystem";
 import { PerkSystem } from "../systems/PerkSystem";
 import { LootDropSystem } from "../systems/LootDropSystem";
 import { EnemySystem } from "../systems/EnemySystem";
+import { ProjectileSystem } from "../systems/ProjectileSystem";
+import { CombatSystem } from "../systems/CombatSystem";
+import { PlayerStateSystem } from "../systems/PlayerStateSystem";
 
 import playerSvg from "../assets/player.svg?url";
 import enemySvg from "../assets/enemy.svg?url";
@@ -112,7 +115,6 @@ const PHASES: PhaseSettings[] = [
 
 export class GameScene extends Phaser.Scene {
   private player!: Player;
-  private bulletsEnemiesOverlap: Phaser.Physics.Arcade.Collider | null = null; // Track overlap to prevent duplicates
   private bullets!: Phaser.Physics.Arcade.Group;
   private enemies!: Phaser.Physics.Arcade.Group;
 
@@ -186,11 +188,16 @@ export class GameScene extends Phaser.Scene {
   // Enemy system
   private enemySystem!: EnemySystem;
 
-  private debugLogs = false; // выключить шумные логи
+  // Projectile system
+  private projectileSystem!: ProjectileSystem;
 
-  // Stage Clear perks (moved to PerkSystem)
-  // playerPierceLevel is synced with PerkSystem via callback onPierceChanged
-  private playerPierceLevel = 0;
+  // Combat system
+  private combatSystem!: CombatSystem;
+
+  // Player state system
+  private playerStateSystem!: PlayerStateSystem;
+
+  private debugLogs = false; // выключить шумные логи
 
   // Weapon-drop and buff loot tracking moved to LootDropSystem
 
@@ -269,6 +276,14 @@ export class GameScene extends Phaser.Scene {
     this.physics.world.setBounds(0, 0, width, height);
     this.player.setCollideWorldBounds(true);
 
+    // Инициализируем PlayerStateSystem (after player is created, before PerkSystem/WeaponSystem)
+    this.playerStateSystem = new PlayerStateSystem({
+      getDebugEnabled: () => this.debugLogs,
+      log: (msg: string) => {
+        console.log(msg);
+      },
+    });
+
     // Группа пуль
     this.bullets = this.physics.add.group({
       classType: Bullet,
@@ -329,10 +344,19 @@ export class GameScene extends Phaser.Scene {
     // Инициализируем PerkSystem
     this.perkSystem = new PerkSystem({
       onPierceChanged: (level: number) => {
-        this.playerPierceLevel = level;
+        // Use PlayerStateSystem as source of truth for pierce
+        // PerkSystem calls this with the new level, but we track increments
+        // So we calculate the difference and add it
+        const currentPierce = this.playerStateSystem.getPierceBonus();
+        const delta = level - currentPierce;
+        if (delta > 0) {
+          this.playerStateSystem.addPierce(delta);
+        }
       },
-      onKnockbackChanged: (multiplier: number) => {
-        this.player.increaseKnockbackMultiplier(multiplier);
+      onKnockbackChanged: (_multiplier: number) => {
+        // Use PlayerStateSystem as source of truth for knockback
+        // multiplier = 0.25 means +25%, so mult = 1.25
+        this.playerStateSystem.mulKnockback(1.25);
       },
       onMagnetChanged: (multiplier: number) => {
         this.player.increaseLootPickupRadiusMultiplier(multiplier);
@@ -431,7 +455,7 @@ export class GameScene extends Phaser.Scene {
       },
       getScene: () => this,
       getBulletsGroup: () => this.bullets,
-      getPlayerPierceLevel: () => this.playerPierceLevel,
+      getPlayerPierceLevel: () => this.playerStateSystem.getPierceBonus(),
       scheduleDelayedCall: (delayMs: number, callback: () => void) => {
         this.time.delayedCall(delayMs, callback);
       },
@@ -491,21 +515,60 @@ export class GameScene extends Phaser.Scene {
       runChildUpdate: true,
     });
 
-    // Коллизии / пересечения
-    // Удаляем старый overlap, если он существует (защита от дублей при restart)
-    if (this.bulletsEnemiesOverlap) {
-      this.bulletsEnemiesOverlap.destroy();
-      this.bulletsEnemiesOverlap = null;
-    }
-    // Создаем overlap только один раз
-    this.bulletsEnemiesOverlap = this.physics.add.overlap(
-      this.bullets,
-      this.enemies,
-      this
-        .handleBulletHitEnemy as Phaser.Types.Physics.Arcade.ArcadePhysicsCallback,
-      undefined,
-      this
-    );
+    // Инициализируем CombatSystem (before ProjectileSystem and EnemySystem)
+    this.combatSystem = new CombatSystem({
+      getIsActive: () => {
+        return this.isStarted && !this.gameOver && !this.isStageClear;
+      },
+      getPlayer: () => this.player,
+      getTimeNow: () => this.time.now,
+      getPlayerStateSystem: () => this.playerStateSystem,
+      onEnemyKilled: (type: "runner" | "tank") => {
+        this.matchStatsSystem.onEnemyKilled(type);
+      },
+      onEnemyKilledTotalOnly: () => {
+        this.matchStatsSystem.onEnemyKilledTotalOnly();
+      },
+      onPlayerDamaged: (amount: number) => {
+        this.matchStatsSystem.onPlayerDamaged(amount);
+        this.updateHealthText();
+      },
+      onEnemyKilledCallback: (enemy: Enemy) => {
+        // Update score UI from MatchStatsSystem
+        const summary = this.matchStatsSystem.getSummary();
+        this.score = summary.score;
+        this.scoreText.setText(`Score: ${this.score}`);
+
+        this.addXP(1);
+        this.maybeDropLoot(enemy.x, enemy.y);
+        // Weapon-drop spawn with constraints
+        this.lootDropSystem.maybeSpawnWeaponLoot(enemy.x, enemy.y);
+        // Buff loot spawn
+        this.lootDropSystem.maybeSpawnBuffLoot(enemy.x, enemy.y);
+      },
+      pausePhysics: () => {
+        this.physics.pause();
+      },
+      resumePhysics: (delayMs: number) => {
+        this.time.delayedCall(delayMs, () => {
+          this.physics.resume();
+        });
+      },
+    });
+
+    // Инициализируем ProjectileSystem (after bullets, enemies groups and CombatSystem are created)
+    this.projectileSystem = new ProjectileSystem({
+      getIsActive: () => {
+        return this.isStarted && !this.gameOver && !this.isStageClear;
+      },
+      getScene: () => this,
+      getBulletsGroup: () => this.bullets,
+      getEnemiesGroup: () => this.enemies,
+      getCombatSystem: () => this.combatSystem,
+      onProjectileHit: () => {
+        this.matchStatsSystem.onProjectileHit();
+      },
+    });
 
     this.physics.add.overlap(
       this.player,
@@ -526,33 +589,12 @@ export class GameScene extends Phaser.Scene {
       getPlayer: () => this.player,
       getPlayerPos: () => ({ x: this.player.x, y: this.player.y }),
       onEnemyHitPlayer: (enemy: Enemy) => {
-        // Delegate to existing handler logic
+        // Delegate to CombatSystem
         if (this.isStageClear) {
           return;
         }
 
-        if (!this.player.isAlive()) {
-          return;
-        }
-
-        // Если игрок неуязвим — просто игнорируем контакт
-        if (this.player.isInvulnerable()) {
-          return;
-        }
-
-        // 1) Наносим урон
-        this.player.takeDamage(1);
-        this.matchStatsSystem.onPlayerDamaged(1);
-        this.updateHealthText();
-
-        // 2) Запускаем i-frames
-        this.player.startInvulnerability(this.player.getIFramesMs());
-
-        // 3) Отбрасываем игрока
-        const strength = enemy.type === "tank" ? 320 : 260; // Чуть сильнее от танка
-        this.player.applyKnockback(enemy.x, enemy.y, strength, 140); // 140ms knockback
-
-        // Врага НЕ уничтожаем!
+        this.combatSystem.onEnemyHitPlayer(enemy);
 
         if (!this.player.isAlive()) {
           this.handleGameOver();
@@ -810,6 +852,11 @@ export class GameScene extends Phaser.Scene {
     this.buffSystem.update();
     this.updateBuffHud(time);
 
+    // Update projectile system
+    if (this.projectileSystem) {
+      this.projectileSystem.update();
+    }
+
     // Clean up inactive buff loot from tracking
     // Clean up expired buff loot items (handled by LootDropSystem)
     if (this.lootDropSystem) {
@@ -848,143 +895,27 @@ export class GameScene extends Phaser.Scene {
     console.warn("[DEPRECATED] spawnEnemy() called, use spawnEnemyByType()");
   }
 
-  // Пуля попала во врага
-  private handleBulletHitEnemy(
-    bulletObj:
-      | Phaser.Types.Physics.Arcade.GameObjectWithBody
-      | Phaser.Tilemaps.Tile,
-    enemyObj:
-      | Phaser.Types.Physics.Arcade.GameObjectWithBody
-      | Phaser.Tilemaps.Tile
-  ) {
-    const bullet = bulletObj as Bullet;
-    const enemy = enemyObj as Enemy;
+  // handleBulletHitEnemy() moved to ProjectileSystem
 
-    // Guard 1: bullet must exist and be active
-    if (!bullet || !bullet.active) {
-      return;
-    }
-
-    // Guard 2: bullet must have enabled body
-    if (!bullet.body) {
-      return;
-    }
-    const bulletBody = bullet.body as Phaser.Physics.Arcade.Body;
-    if (!bulletBody.enable) {
-      return;
-    }
-
-    // Guard 3: enemy must exist, be active and not dying
-    if (!enemy || !enemy.active || (enemy as any).isDying) {
-      return;
-    }
-
-    // Guard 4: защита от повторного попадания в того же врага (для pierce) - используем стабильный ID
-    // Это критически важно: проверяем ДО любых других операций
-    if (bullet.hasHitEnemy(enemy.id)) {
-      return; // Уже обработано - игнорируем дубль
-    }
-
-    // Guard 5: помечаем врага как обработанного СРАЗУ (до любых других операций) - используем стабильный ID
-    // Это защищает от двойного overlap в одном кадре или при повторных вызовах
-    // ДОЛЖНО быть вызвано ДО onProjectileHit(), чтобы защита работала
-    bullet.markEnemyHit(enemy.id);
-
-    // Визуальный фидбек до уничтожения пули
-    enemy.applyHitFeedback(bullet.x, bullet.y, this.time.now);
-
-    // Статистика: попадание (каждое попадание пули в врага = +1)
-    // Вызывается ТОЛЬКО после успешного guard и markEnemyHit
-    this.matchStatsSystem.onProjectileHit();
-
-    // Наносим урон (урон игрока, без бонуса оружия)
-    const totalDamage = this.player.getDamage();
-    const killed = enemy.takeDamage(totalDamage);
-
-    // Проверяем pierce: если пуля может пробить, уменьшаем счётчик и не уничтожаем
-    if (bullet.pierceLeft > 0) {
-      bullet.pierceLeft--;
-      // Пуля продолжает полёт и может попасть в другого врага
-    } else {
-      // Пуля не может пробить - отключаем коллайдер и уничтожаем немедленно
-      // Делаем это СРАЗУ, чтобы предотвратить повторную обработку в том же кадре
-      bulletBody.enable = false;
-      bullet.setActive(false);
-      bullet.setVisible(false);
-      bullet.destroy();
-    }
-
-    if (killed) {
-      // Микро hit-stop
-      this.physics.pause();
-      this.time.delayedCall(14, () => {
-        this.physics.resume();
-      });
-
-      enemy.die(bullet.x, bullet.y);
-
-      // Статистика: убийство (score обновляется внутри MatchStatsSystem)
-      if (enemy.type === "runner" || enemy.type === "tank") {
-        this.matchStatsSystem.onEnemyKilled(enemy.type);
-      } else {
-        // fast/heavy count as total kills only
-        this.matchStatsSystem.onEnemyKilledTotalOnly();
-      }
-
-      // Update score UI from MatchStatsSystem
-      const summary = this.matchStatsSystem.getSummary();
-      this.score = summary.score;
-      this.scoreText.setText(`Score: ${this.score}`);
-
-      this.addXP(1);
-      this.maybeDropLoot(enemy.x, enemy.y);
-      // Weapon-drop spawn with constraints
-      this.lootDropSystem.maybeSpawnWeaponLoot(enemy.x, enemy.y);
-      // Buff loot spawn
-      this.lootDropSystem.maybeSpawnBuffLoot(enemy.x, enemy.y);
-    }
-  }
-
-  // Враг коснулся игрока
+  // Враг коснулся игрока - делегируем в CombatSystem
   private handleEnemyHitPlayer(
-    playerObj:
+    _playerObj:
       | Phaser.Types.Physics.Arcade.GameObjectWithBody
       | Phaser.Tilemaps.Tile,
     enemyObj:
       | Phaser.Types.Physics.Arcade.GameObjectWithBody
       | Phaser.Tilemaps.Tile
-  ) {
+  ): void {
     if (this.isStageClear) {
       return;
     }
 
-    const player = playerObj as Player;
     const enemy = enemyObj as Enemy;
 
-    if (!player.isAlive()) {
-      return;
-    }
+    // Делегируем в CombatSystem
+    this.combatSystem.onEnemyHitPlayer(enemy);
 
-    // Если игрок неуязвим — просто игнорируем контакт
-    if (player.isInvulnerable()) {
-      return;
-    }
-
-    // 1) Наносим урон
-    player.takeDamage(1);
-    this.matchStatsSystem.onPlayerDamaged(1);
-    this.updateHealthText();
-
-    // 2) Запускаем i-frames
-    player.startInvulnerability(player.getIFramesMs());
-
-    // 3) Отбрасываем игрока
-    const strength = enemy.type === "tank" ? 320 : 260; // Чуть сильнее от танка
-    player.applyKnockback(enemy.x, enemy.y, strength, 140); // 140ms knockback
-
-    // Врага НЕ уничтожаем!
-
-    if (!player.isAlive()) {
+    if (!this.player.isAlive()) {
       this.handleGameOver();
     }
   }
@@ -1494,7 +1425,11 @@ export class GameScene extends Phaser.Scene {
     // Reset perk system
     if (this.perkSystem) {
       this.perkSystem.reset();
-      this.playerPierceLevel = 0;
+    }
+
+    // Reset player state system
+    if (this.playerStateSystem) {
+      this.playerStateSystem.reset();
     }
   }
 

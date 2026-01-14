@@ -37,7 +37,9 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
   private iFramesBonusLevel = 0; // 0..4
 
   // Stage Clear perks
-  private knockbackMultiplier = 1.0; // Умножает силу knockback
+  // TODO: Remove after full migration to PlayerStateSystem
+  // @deprecated Use PlayerStateSystem.getKnockbackMultiplier() instead
+  private knockbackMultiplier = 1.0; // Fallback for backward compatibility (used only if no multiplier passed to applyKnockback)
   private lootPickupRadiusMultiplier = 1.0; // Умножает радиус подбора лута
 
   constructor(scene: Phaser.Scene, x: number, y: number) {
@@ -85,7 +87,8 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
     fromX: number,
     fromY: number,
     strength: number,
-    durationMs: number
+    durationMs: number,
+    knockbackMultiplier?: number
   ): void {
     const dx = this.x - fromX;
     const dy = this.y - fromY;
@@ -94,15 +97,23 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
     const ny = dy / dist;
 
     // Применяем множитель knockback из перков
-    const finalStrength = strength * this.knockbackMultiplier;
+    // Если множитель передан извне (из PlayerStateSystem), используем его
+    // Иначе используем внутренний (для обратной совместимости)
+    const mult = knockbackMultiplier !== undefined ? knockbackMultiplier : this.knockbackMultiplier;
+    const finalStrength = strength * mult;
 
     this.knockbackVx = nx * finalStrength;
     this.knockbackVy = ny * finalStrength;
     this.knockbackUntil = this.scene.time.now + durationMs;
   }
 
-  public increaseKnockbackMultiplier(amount: number): void {
-    this.knockbackMultiplier += amount;
+  // TODO: Remove after full migration to PlayerStateSystem
+  // increaseKnockbackMultiplier() is no longer called - knockback is managed by PlayerStateSystem
+  // @deprecated Use PlayerStateSystem.getKnockbackMultiplier() instead
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  // @ts-ignore - kept for backward compatibility fallback in applyKnockback
+  public increaseKnockbackMultiplier(_amount: number): void {
+    // No-op: knockback is now managed by PlayerStateSystem
   }
 
   public getLootPickupRadiusMultiplier(): number {
