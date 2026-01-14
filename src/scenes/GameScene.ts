@@ -323,6 +323,8 @@ export class GameScene extends Phaser.Scene {
 
     // Create GameContext with getters that read fresh values from GameScene
     // Note: matchStateSystem will be set after systems are created
+    const logFn = (msg: string) => console.log(msg);
+
     const ctx: GameContext = {
       scene: this,
       player: this.player,
@@ -341,7 +343,7 @@ export class GameScene extends Phaser.Scene {
       getIsGameOver: () => this.systems.matchStateSystem.isGameOver(),
       getIsStageClear: () => this.systems.matchStateSystem.isStageClear(),
       debugEnabled: () => this.debugLogs,
-      log: (msg: string) => console.log(msg),
+      log: logFn,
     };
 
     // Create GameSystems with callbacks
@@ -420,7 +422,7 @@ export class GameScene extends Phaser.Scene {
       updatePlayerPickupRadius: () => this.updatePlayerPickupRadius(),
       hasLootOfType: (type: string) => !this.hasLootOfType(type as LootType),
       onWeaponDropPicked: () => this.onWeaponDropPicked(),
-      log: (msg: string) => console.log(msg),
+      log: (msg: string) => ctx.log?.(msg) ?? console.log(msg),
     };
 
     // Create GameSystems container
@@ -428,6 +430,16 @@ export class GameScene extends Phaser.Scene {
 
     // Initialize systems (create overlaps, etc.)
     this.systems.init();
+
+    // Reset systems to ensure clean state after scene restart
+    // This ensures that restart always leads to the same initial state
+    this.systems.resetMatch();
+    this.enemySpeedMultiplier = 1.0;
+
+    // Reset MatchStateSystem to initial state explicitly
+    this.systems.matchStateSystem.setStarted(false);
+    this.systems.matchStateSystem.setGameOver(false);
+    this.systems.matchStateSystem.setStageClear(false);
 
     // UI: score и здоровье (score managed by MatchStatsSystem)
     this.score = 0;
@@ -464,12 +476,7 @@ export class GameScene extends Phaser.Scene {
     this.updateBuffHud();
 
     // Временный лог порогов для проверки (только если debugLogs включен)
-    if (this.debugLogs) {
-      console.log("XP Thresholds for first 10 levels:");
-      for (let lvl = 1; lvl <= 10; lvl++) {
-        console.log(`lvl ${lvl} need ${this.getXPToNextLevel(lvl)}`);
-      }
-    }
+    // Removed: debug logs should go through ctx.log if needed
 
     // UI: патроны и прогресс-бар перезарядки (слева внизу)
     const ammoY = height - 60;
@@ -680,7 +687,9 @@ export class GameScene extends Phaser.Scene {
     }
     // Base radius for loot pickup overlap (player's default collision radius)
     const baseRadius = 16;
-    const magnetMult = this.playerStateSystem.getMagnetMultiplier();
+    // Read magnet multiplier from unified stats snapshot
+    const playerStats = this.playerStateSystem.getStats();
+    const magnetMult = playerStats.magnetMultiplier;
     // Update collision radius to increase loot pickup range
     playerBody.setCircle(baseRadius * magnetMult);
   }
@@ -890,7 +899,17 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    const loot = new LootPickup(this, x, y, lootType);
+    // Use systems context log if available (systems are created before this can be called)
+    const logFn = this.systems
+      ? ((this.systems as any).ctx as GameContext)?.log
+      : undefined;
+    const loot = new LootPickup(
+      this,
+      x,
+      y,
+      lootType,
+      logFn ?? ((msg: string) => console.log(msg))
+    );
     this.loot.add(loot);
   }
 

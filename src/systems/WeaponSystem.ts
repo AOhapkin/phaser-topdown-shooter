@@ -141,8 +141,10 @@ export class WeaponSystem {
     const aimAngle = this.callbacks.getAimAngle();
     const scene = this.callbacks.getScene();
     const bullets = this.callbacks.getBulletsGroup();
-    const pierceLevel = this.callbacks.getPlayerPierceLevel();
-    const bulletSizeMult = this.callbacks.getPlayerStateSystem().getBulletSizeMultiplier();
+    // Read all player stats from unified snapshot
+    const playerStats = this.callbacks.getPlayerStateSystem().getStats();
+    const pierceLevel = playerStats.pierceBonus;
+    const bulletSizeMult = playerStats.bulletSizeMultiplier;
 
     // First shot: use weapon.tryFire (handles ammo, reload, fireRate update)
     this.currentWeapon.tryFire({

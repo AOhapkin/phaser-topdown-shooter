@@ -156,7 +156,7 @@ export class GameSystems {
         const isDying = (enemy as any).isDying;
         return !isDying;
       },
-      log: (msg: string) => ctx.log?.(msg) ?? console.log(msg),
+      log: (msg: string) => ctx.log?.(msg),
     });
 
     // 8. PerkSystem (depends on playerStateSystem)
@@ -299,7 +299,7 @@ export class GameSystems {
       },
       getScene: () => ctx.scene,
       getBulletsGroup: () => ctx.bulletsGroup,
-      getPlayerPierceLevel: () => this.playerStateSystem.getPierceBonus(),
+      getPlayerPierceLevel: () => this.playerStateSystem.getStats().pierceBonus,
       getPlayerStateSystem: () => this.playerStateSystem,
       scheduleDelayedCall: (delayMs: number, callback: () => void) => {
         ctx.scene.time.delayedCall(delayMs, callback);
@@ -354,7 +354,7 @@ export class GameSystems {
       onWeaponDropPicked: () => {
         this.callbacks.onWeaponDropPicked();
       },
-      log: (msg: string) => ctx.log?.(msg) ?? console.log(msg),
+      log: (msg: string) => ctx.log?.(msg),
     });
   }
 
@@ -384,11 +384,16 @@ export class GameSystems {
     // MatchStateSystem must be reset first
     this.matchStateSystem.reset();
     this.buffSystem.reset();
-    this.stageSystem.reset(timeNow);
+    // Reset stage system state (does not start - start() is called explicitly in startGameFromOverlay())
+    this.stageSystem.reset();
     this.lootDropSystem.reset();
     this.matchStatsSystem.reset(timeNow);
     this.perkSystem.reset();
     this.playerStateSystem.reset();
+    this.weaponSystem.reset();
+    this.enemySystem.reset();
+    this.projectileSystem.reset();
+    this.combatSystem.reset();
     this.callbacks.updatePlayerPickupRadius();
   }
 

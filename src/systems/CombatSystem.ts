@@ -100,7 +100,9 @@ export class CombatSystem {
 
     // 3) Отбрасываем игрока
     const strength = enemy.type === "tank" ? 320 : 260; // Чуть сильнее от танка
-    const knockbackMult = this.callbacks.getPlayerStateSystem().getKnockbackMultiplier();
+    // Read knockback multiplier from unified stats snapshot
+    const playerStats = this.callbacks.getPlayerStateSystem().getStats();
+    const knockbackMult = playerStats.knockbackMultiplier;
     player.applyKnockback(enemy.x, enemy.y, strength, 140, knockbackMult); // 140ms knockback
 
     // Врага НЕ уничтожаем!

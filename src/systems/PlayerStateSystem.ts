@@ -4,8 +4,23 @@ export interface PlayerStateSystemCallbacks {
 }
 
 /**
+ * PlayerStatsSnapshot - unified interface for all player stat modifiers
+ * Single source of truth for reading player stats
+ */
+export interface PlayerStatsSnapshot {
+  pierceBonus: number;
+  knockbackMultiplier: number;
+  bulletSizeMultiplier: number;
+  magnetMultiplier: number;
+  // Placeholders for future modifiers (not used yet, default to 1.0)
+  damageMultiplier: number;
+  reloadMultiplier: number;
+  moveSpeedMultiplier: number;
+}
+
+/**
  * PlayerStateSystem manages player state and modifiers
- * Currently only handles pierce bonus (minimal increment)
+ * Single source of truth for player stats
  */
 export class PlayerStateSystem {
   private callbacks: PlayerStateSystemCallbacks;
@@ -32,7 +47,25 @@ export class PlayerStateSystem {
   }
 
   /**
+   * Get unified player stats snapshot
+   * This is the primary way to read player stats
+   */
+  getStats(): PlayerStatsSnapshot {
+    return {
+      pierceBonus: this.pierceBonus,
+      knockbackMultiplier: this.getKnockbackMultiplier(),
+      bulletSizeMultiplier: this.getBulletSizeMultiplier(),
+      magnetMultiplier: this.getMagnetMultiplier(),
+      // Placeholders for future modifiers
+      damageMultiplier: 1.0,
+      reloadMultiplier: 1.0,
+      moveSpeedMultiplier: 1.0,
+    };
+  }
+
+  /**
    * Get current pierce bonus
+   * @deprecated Use getStats().pierceBonus instead
    */
   getPierceBonus(): number {
     return this.pierceBonus;
@@ -49,6 +82,7 @@ export class PlayerStateSystem {
   /**
    * Get current knockback multiplier
    * Formula: 1.0 + level * 0.25 (matches current behavior: += 0.25 per perk)
+   * @deprecated Use getStats().knockbackMultiplier instead
    */
   getKnockbackMultiplier(): number {
     return 1.0 + this.knockbackLevel * 0.25;
@@ -78,6 +112,7 @@ export class PlayerStateSystem {
   /**
    * Get current bullet size multiplier
    * Formula: 1.0 + level * 0.3 (matches current behavior: +30% per perk)
+   * @deprecated Use getStats().bulletSizeMultiplier instead
    */
   getBulletSizeMultiplier(): number {
     return 1.0 + this.bulletSizeLevel * 0.3;
@@ -107,6 +142,7 @@ export class PlayerStateSystem {
   /**
    * Get current magnet multiplier
    * Formula: 1.0 + level * 0.2 (matches current behavior: += 0.2 per perk)
+   * @deprecated Use getStats().magnetMultiplier instead
    */
   getMagnetMultiplier(): number {
     return 1.0 + this.magnetLevel * 0.2;

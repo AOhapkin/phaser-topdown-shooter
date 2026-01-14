@@ -135,7 +135,8 @@ export class LootDropSystem {
       this.callbacks.getScene(),
       x,
       y,
-      buffType
+      buffType,
+      this.callbacks.log
     );
     this.callbacks.getLootGroup().add(buffLoot);
     this.activeBuffLoot.add(buffLoot);
@@ -185,7 +186,8 @@ export class LootDropSystem {
       this.callbacks.getScene(),
       x,
       y,
-      "weapon-drop"
+      "weapon-drop",
+      this.callbacks.log
     );
     this.callbacks.getLootGroup().add(weaponLoot);
     this.lastWeaponDropTime = now;

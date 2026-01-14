@@ -19,8 +19,15 @@ export class LootPickup extends Phaser.Physics.Arcade.Sprite {
   private blinkStartTime: number;
   private lastBlinkToggle = 0;
   private isBlinking = false;
+  private log?: (msg: string) => void;
 
-  constructor(scene: Phaser.Scene, x: number, y: number, lootType: LootType) {
+  constructor(
+    scene: Phaser.Scene,
+    x: number,
+    y: number,
+    lootType: LootType,
+    log?: (msg: string) => void
+  ) {
     const textureKey =
       lootType === "heal"
         ? "loot-heal"
@@ -31,6 +38,7 @@ export class LootPickup extends Phaser.Physics.Arcade.Sprite {
     super(scene, x, y, textureKey);
 
     this.lootType = lootType;
+    this.log = log;
 
     // TTL tracking: random 8-12 seconds
     this.spawnTime = scene.time.now;
@@ -185,9 +193,19 @@ export class LootPickup extends Phaser.Physics.Arcade.Sprite {
     if (time >= this.expireTime) {
       // Log expiration for buff loot
       if (this.lootType.startsWith("buff-")) {
-        console.log(`[LOOT] buff expired: ${this.lootType}`);
+        if (this.log) {
+          this.log(`[LOOT] buff expired: ${this.lootType}`);
+        } else {
+          // Fallback for backward compatibility (should not happen in normal flow)
+          console.log(`[LOOT] buff expired: ${this.lootType}`);
+        }
       } else if (this.lootType === "weapon-drop") {
-        console.log(`[LOOT] weapon-drop expired`);
+        if (this.log) {
+          this.log(`[LOOT] weapon-drop expired`);
+        } else {
+          // Fallback for backward compatibility (should not happen in normal flow)
+          console.log(`[LOOT] weapon-drop expired`);
+        }
       }
       this.destroy();
     }

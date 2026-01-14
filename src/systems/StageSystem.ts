@@ -1,7 +1,7 @@
 import Phaser from "phaser";
 
 // Stage system constants
-const STAGE_DURATION_SEC = 25;
+const STAGE_DURATION_SEC = 15; // Reduced for faster testing (was 25)
 const BURST_INTERVAL_MIN_SEC = 12;
 const BURST_INTERVAL_MAX_SEC = 15;
 const BURST_DURATION_MIN_SEC = 4;
@@ -36,6 +36,24 @@ export class StageSystem {
     this.callbacks = callbacks;
   }
 
+  /**
+   * Reset stage system state without starting
+   * Only resets fields/timers/state, does not log or trigger callbacks
+   */
+  reset(): void {
+    this.currentStage = 1;
+    this.stageStartTime = 0;
+    this.stageElapsedSec = 0;
+    this.burstState = "idle";
+    this.nextBurstTime = 0;
+    this.burstEndTime = 0;
+    this.recoveryEndTime = 0;
+  }
+
+  /**
+   * Start stage system (first stage)
+   * This is the only place where [STAGE] START is logged
+   */
   start(timeMs: number): void {
     this.currentStage = 1;
     this.stageStartTime = timeMs;
@@ -45,10 +63,6 @@ export class StageSystem {
     // Logging: StageSystem is the single source of truth for stage logs
     this.callbacks.log?.(`[STAGE] START stage=${this.currentStage} duration=${STAGE_DURATION_SEC}s`);
     this.callbacks.onStageStart(this.currentStage);
-  }
-
-  reset(timeMs: number): void {
-    this.start(timeMs);
   }
 
   update(timeMs: number): void {
