@@ -1,3 +1,6 @@
+import Phaser from "phaser";
+import { PERKS_CONFIG } from "../config/PerksConfig";
+
 export type PerkId = "pierce" | "knockback" | "magnet" | "heal_on_clear" | "bullet_size";
 
 export interface PerkDef {
@@ -8,11 +11,11 @@ export interface PerkDef {
 }
 
 export interface PerkSystemCallbacks {
-  onPierceChanged: (level: number) => void;
-  onKnockbackChanged: (multiplier: number) => void;
-  onMagnetChanged: (multiplier: number) => void;
-  onHealOnClear: () => void;
-  onBulletSizeChanged: (multiplier: number) => void;
+  /**
+   * Unified callback for perk application
+   * Called after perk level is incremented
+   */
+  onPerkApplied?: (perkId: PerkId, newLevel: number, delta: number) => void;
   log?: (msg: string) => void;
 }
 
@@ -37,40 +40,10 @@ export class PerkSystem {
 
   /**
    * Get all perk definitions
+   * Now reads from PerksConfig (data-driven)
    */
   getAllDefs(): PerkDef[] {
-    return [
-      {
-        id: "pierce",
-        title: "PIERCE +1",
-        desc: "",
-        // No maxLevel - can be upgraded unlimited times
-      },
-      {
-        id: "knockback",
-        title: "KNOCKBACK +25%",
-        desc: "",
-        // No maxLevel - can be upgraded unlimited times
-      },
-      {
-        id: "magnet",
-        title: "MAGNET +20%",
-        desc: "",
-        // No maxLevel - can be upgraded unlimited times
-      },
-      {
-        id: "heal_on_clear",
-        title: "HEAL ON CLEAR",
-        desc: "",
-        maxLevel: 1, // Can only be picked once
-      },
-      {
-        id: "bullet_size",
-        title: "BULLET SIZE +30%",
-        desc: "",
-        // No maxLevel - can be upgraded unlimited times
-      },
-    ];
+    return PERKS_CONFIG;
   }
 
   /**
@@ -125,28 +98,16 @@ export class PerkSystem {
 
     // Increase level
     this.levels[id]++;
+    const newLevel = this.levels[id];
+    const delta = 1; // Always +1 per apply
 
-    // Log perk selection
+    // Call unified callback first
+    this.callbacks.onPerkApplied?.(id, newLevel, delta);
+
+    // Log perk selection (legacy log)
     this.callbacks.log?.(`[PERK] picked ${def.title}`);
 
-    // Apply effect through callbacks
-    switch (id) {
-      case "pierce":
-        this.callbacks.onPierceChanged(this.levels[id]);
-        break;
-      case "knockback":
-        this.callbacks.onKnockbackChanged(0.25);
-        break;
-      case "magnet":
-        this.callbacks.onMagnetChanged(0.2);
-        break;
-      case "heal_on_clear":
-        this.callbacks.onHealOnClear();
-        break;
-      case "bullet_size":
-        this.callbacks.onBulletSizeChanged(0.3);
-        break;
-    }
+    // All perks are now handled via onPerkApplied, no legacy callbacks remain
   }
 
   /**

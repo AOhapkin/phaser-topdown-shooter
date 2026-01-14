@@ -6,6 +6,7 @@ import { ProjectileSystem } from "./ProjectileSystem";
 import { WeaponSystem } from "./WeaponSystem";
 import { EnemySystem } from "./EnemySystem";
 import { PerkSystem } from "./PerkSystem";
+import { PerkEffectsSystem } from "./PerkEffectsSystem";
 import { BuffSystem } from "./BuffSystem";
 import { MatchStatsSystem } from "./MatchStatsSystem";
 import { StageSystem } from "./StageSystem";
@@ -69,6 +70,7 @@ export class GameSystems {
   public readonly weaponSystem: WeaponSystem;
   public readonly enemySystem: EnemySystem;
   public readonly perkSystem: PerkSystem;
+  private readonly perkEffects: PerkEffectsSystem;
   public readonly buffSystem: BuffSystem;
   public readonly matchStatsSystem: MatchStatsSystem;
   public readonly stageSystem: StageSystem;
@@ -90,6 +92,11 @@ export class GameSystems {
       getDebugEnabled: () => ctx.debugEnabled?.() ?? false,
       log: (msg: string) => ctx.log?.(msg),
     });
+
+    // 2.5. PerkEffectsSystem (depends on playerStateSystem)
+    this.perkEffects = new PerkEffectsSystem(this.playerStateSystem, () =>
+      this.callbacks.updatePlayerPickupRadius()
+    );
 
     // 3. OverlaySystem (no dependencies)
     this.overlaySystem = new OverlaySystem();
@@ -161,25 +168,16 @@ export class GameSystems {
 
     // 8. PerkSystem (depends on playerStateSystem)
     this.perkSystem = new PerkSystem({
-      onPierceChanged: (level: number) => {
-        const currentPierce = this.playerStateSystem.getPierceBonus();
-        const delta = level - currentPierce;
-        if (delta > 0) {
-          this.playerStateSystem.addPierce(delta);
+      onPerkApplied: (perkId, newLevel, delta) => {
+        // Log in debug mode through unified logger
+        if (ctx.debugEnabled?.()) {
+          ctx.log?.(
+            `[PERK_APPLY] id=${perkId} level=${newLevel} delta=${delta}`
+          );
         }
-      },
-      onKnockbackChanged: (_multiplier: number) => {
-        this.playerStateSystem.mulKnockback(1.25);
-      },
-      onMagnetChanged: (_multiplier: number) => {
-        this.playerStateSystem.mulMagnet(1.2);
-        this.callbacks.updatePlayerPickupRadius();
-      },
-      onHealOnClear: () => {
-        this.playerStateSystem.enableHealOnClear();
-      },
-      onBulletSizeChanged: (_multiplier: number) => {
-        this.playerStateSystem.mulBulletSize(1.3);
+
+        // Apply perk effects through PerkEffectsSystem
+        this.perkEffects.apply(perkId, delta);
       },
       log: (msg: string) => ctx.log?.(msg),
     });

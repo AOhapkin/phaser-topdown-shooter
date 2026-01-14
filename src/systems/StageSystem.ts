@@ -1,13 +1,14 @@
 import Phaser from "phaser";
+import { GameTuning } from "../config/GameTuning";
 
 // Stage system constants
-const STAGE_DURATION_SEC = 15; // Reduced for faster testing (was 25)
-const BURST_INTERVAL_MIN_SEC = 12;
-const BURST_INTERVAL_MAX_SEC = 15;
-const BURST_DURATION_MIN_SEC = 4;
-const BURST_DURATION_MAX_SEC = 6;
-const RECOVERY_DURATION_MIN_SEC = 2;
-const RECOVERY_DURATION_MAX_SEC = 3;
+const STAGE_DURATION_SEC = GameTuning.stageDurationSec;
+const BURST_INTERVAL_MIN_SEC = GameTuning.burst.intervalMinSec;
+const BURST_INTERVAL_MAX_SEC = GameTuning.burst.intervalMaxSec;
+const BURST_DURATION_MIN_SEC = GameTuning.burst.durationMinSec;
+const BURST_DURATION_MAX_SEC = GameTuning.burst.durationMaxSec;
+const RECOVERY_DURATION_MIN_SEC = GameTuning.burst.recoveryMinSec;
+const RECOVERY_DURATION_MAX_SEC = GameTuning.burst.recoveryMaxSec;
 
 export type BurstState = "idle" | "burst" | "recovery";
 
