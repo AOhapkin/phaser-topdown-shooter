@@ -1,4 +1,5 @@
 import Phaser from "phaser";
+import { GameTuning } from "../config/GameTuning";
 
 export type EnemyType = "runner" | "tank";
 
@@ -108,9 +109,9 @@ export class SpawnSystem {
     this.currentSpawnDelay = delay;
     this.nextSpawnAtMs = time + delay;
 
-    // Создаём новый таймер, который тикает каждые 200ms
+    // Создаём новый таймер, который тикает каждые tickIntervalMs (из GameTuning)
     this.spawnTickEvent = this.scene.time.addEvent({
-      delay: 200,
+      delay: GameTuning.spawn.tickIntervalMs,
       loop: true,
       callback: () => this.spawnTick(),
     });
@@ -134,7 +135,7 @@ export class SpawnSystem {
     const alive = this.callbacks.getAliveEnemiesCount();
     if (alive >= settings.maxAliveEnemies) {
       // Если достигнут лимит, откладываем следующий спавн на короткое время
-      this.nextSpawnAtMs = now + 500; // проверяем каждые 500ms
+      this.nextSpawnAtMs = now + GameTuning.spawn.retryDelayMs;
       return;
     }
 

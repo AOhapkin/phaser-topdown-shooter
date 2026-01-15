@@ -18,6 +18,8 @@ import { EnemySystem } from "../systems/EnemySystem";
 import { CombatSystem } from "../systems/CombatSystem";
 import { PlayerStateSystem } from "../systems/PlayerStateSystem";
 import { GameContext } from "../systems/GameContext";
+import type { WeaponId as WeaponConfigId } from "../config/WeaponsConfig";
+import { GameTuning } from "../config/GameTuning";
 import { GameSystems, GameSystemsCallbacks } from "../systems/GameSystems";
 
 import playerSvg from "../assets/player.svg?url";
@@ -49,16 +51,14 @@ type PhaseSettings = {
   tankCap: number;
 };
 
-const PHASE_DURATION_SEC = 45;
-const MIN_SPAWN_DELAY_MS = 560;
+// Phase settings moved to GameTuning.spawn.phases
+const PHASES: readonly PhaseSettings[] = GameTuning.spawn.phases;
 
-// Stage system constants moved to StageSystem.ts
-
-// Burst modifiers
-const BURST_SPAWN_REDUCTION = 0.45; // 45% reduction (spawn 55% faster)
-const BURST_RUNNER_WEIGHT_BOOST = 1.3; // 30% boost to runner weight
-const BURST_SPEED_BOOST = 1.12; // 12% speed increase
-const RECOVERY_SPAWN_MULTIPLIER = 1.2; // 20% slower spawn (multiply delay by 1.2)
+// Burst modifiers moved to GameTuning.spawn.burst
+const BURST_SPAWN_REDUCTION = GameTuning.spawn.burst.spawnReduction;
+const BURST_RUNNER_WEIGHT_BOOST = GameTuning.spawn.burst.runnerWeightBoost;
+const BURST_SPEED_BOOST = GameTuning.spawn.burst.speedBoost;
+const RECOVERY_SPAWN_MULTIPLIER = GameTuning.spawn.recovery.spawnMultiplier;
 
 // Weapon-drop and buff drop parameters moved to LootDropSystem
 
@@ -67,49 +67,6 @@ const RECOVERY_SPAWN_MULTIPLIER = 1.2; // 20% slower spawn (multiply delay by 1.
 type BuffType = "rapid" | "double" | "pierce" | "freeze";
 
 // MatchStats type removed - now handled by MatchStatsSystem
-
-const PHASES: PhaseSettings[] = [
-  {
-    phase: 1,
-    durationSec: PHASE_DURATION_SEC,
-    maxAliveEnemies: 10,
-    spawnDelayMs: 900,
-    weights: { runner: 100, tank: 0 },
-    tankCap: 0,
-  },
-  {
-    phase: 2,
-    durationSec: PHASE_DURATION_SEC,
-    maxAliveEnemies: 12,
-    spawnDelayMs: 850,
-    weights: { runner: 90, tank: 10 },
-    tankCap: 1,
-  },
-  {
-    phase: 3,
-    durationSec: PHASE_DURATION_SEC,
-    maxAliveEnemies: 14,
-    spawnDelayMs: 800,
-    weights: { runner: 80, tank: 20 },
-    tankCap: 2,
-  },
-  {
-    phase: 4,
-    durationSec: PHASE_DURATION_SEC,
-    maxAliveEnemies: 16,
-    spawnDelayMs: 760,
-    weights: { runner: 70, tank: 30 },
-    tankCap: 3,
-  },
-  {
-    phase: 5,
-    durationSec: PHASE_DURATION_SEC,
-    maxAliveEnemies: 18,
-    spawnDelayMs: 720,
-    weights: { runner: 60, tank: 40 },
-    tankCap: 4,
-  },
-];
 
 export class GameScene extends Phaser.Scene {
   private player!: Player;
@@ -270,6 +227,25 @@ export class GameScene extends Phaser.Scene {
       }
     });
 
+    // Debug hotkey: spawn weapon-drop (O) - only if debug enabled
+    if (GameTuning.debug.enabled) {
+      const weaponDropKey = this.input.keyboard?.addKey(
+        Phaser.Input.Keyboard.KeyCodes.O
+      );
+      weaponDropKey?.on("down", () => {
+        if (!this.systems) {
+          return;
+        }
+        const playerPos = { x: this.player.x, y: this.player.y };
+        // Spawn weapon-drop near player with small offset
+        const offsetX = Phaser.Math.Between(-30, 30);
+        const offsetY = Phaser.Math.Between(-30, 30);
+        const spawnX = playerPos.x + offsetX;
+        const spawnY = playerPos.y + offsetY;
+        this.lootDropSystem.spawnWeaponLootDebug(spawnX, spawnY);
+      });
+    }
+
     // Hotkey F2 для печати статистики
     const statsKey = this.input.keyboard?.addKey(
       Phaser.Input.Keyboard.KeyCodes.F2
@@ -421,7 +397,8 @@ export class GameScene extends Phaser.Scene {
       },
       updatePlayerPickupRadius: () => this.updatePlayerPickupRadius(),
       hasLootOfType: (type: string) => !this.hasLootOfType(type as LootType),
-      onWeaponDropPicked: () => this.onWeaponDropPicked(),
+      onWeaponDropPicked: (_weaponId: WeaponConfigId | null) =>
+        this.onWeaponDropPicked(_weaponId),
       log: (msg: string) => ctx.log?.(msg) ?? console.log(msg),
     };
 
@@ -702,7 +679,9 @@ export class GameScene extends Phaser.Scene {
   }
 
   private getPhaseNumber(elapsedSec: number): number {
-    return Math.floor(elapsedSec / PHASE_DURATION_SEC) + 1;
+    // Phase duration from GameTuning (all phases have same duration)
+    const phaseDurationSec = GameTuning.spawn.phases[0]?.durationSec ?? 45;
+    return Math.floor(elapsedSec / phaseDurationSec) + 1;
   }
 
   private getPhaseSettings(phase: number): PhaseSettings {
@@ -716,12 +695,12 @@ export class GameScene extends Phaser.Scene {
     const aliveBoost = Math.floor(extra / 2) * 2; // +2 каждые 2 фазы
     const maxAliveEnemies = 20 + aliveBoost; // фаза 6 стартует с 20
     const spawnDelayMs = Math.max(
-      MIN_SPAWN_DELAY_MS,
+      GameTuning.spawn.minDelayMs,
       680 - Math.floor(extra / 1) * 35
     );
     return {
       phase,
-      durationSec: PHASE_DURATION_SEC,
+      durationSec: GameTuning.spawn.phases[0]?.durationSec ?? 45,
       maxAliveEnemies,
       spawnDelayMs,
       weights: { runner: 55, tank: 45 },
@@ -738,14 +717,18 @@ export class GameScene extends Phaser.Scene {
   }
 
   private getStageTankWeightMultiplier(stage: number): number {
-    // Увеличиваем вес танков на 8% за стадию
-    return Math.pow(1.08, stage - 1);
+    // Увеличиваем вес танков на 8% за стадию (из GameTuning)
+    const perStagePercent =
+      GameTuning.enemies.tankWeightScaling.perStagePercent;
+    return Math.pow(1 + perStagePercent / 100, stage - 1);
   }
 
   private getStageSpeedMultiplier(stage: number): number {
-    // Увеличиваем скорость врагов на 2% за стадию
+    // Увеличиваем скорость врагов на 2% за стадию (из GameTuning)
     // Максимум 1.3 (не быстрее чем в 1.3 раза)
-    return Math.min(1.3, 1.0 + (stage - 1) * 0.02);
+    const perStagePercent = GameTuning.enemies.speedScaling.perStagePercent;
+    const maxMultiplier = GameTuning.enemies.speedScaling.maxMultiplier;
+    return Math.min(maxMultiplier, 1.0 + (stage - 1) * (perStagePercent / 100));
   }
 
   private applyStageSpeedToEnemies(): void {
@@ -759,19 +742,21 @@ export class GameScene extends Phaser.Scene {
   // @ts-ignore - Method kept for potential future use
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   private getStageRunnerHP(stage: number): number {
-    // runner: 1 HP до стадии 4, затем 2 до стадии 7, затем 3
-    if (stage >= 7) return 3;
-    if (stage >= 4) return 2;
-    return 1;
+    // runner: 1 HP до стадии 4, затем 2 до стадии 7, затем 3 (из GameTuning)
+    const scaling = GameTuning.enemies.hpScaling.runner;
+    if (stage >= 7) return scaling.stage7;
+    if (stage >= 4) return scaling.stage4;
+    return GameTuning.enemies.types.runner.baseHp;
   }
 
   // @ts-ignore - Method kept for potential future use
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   private getStageTankHP(stage: number): number {
-    // tank: 3 HP до стадии 4, затем 4 до стадии 7, затем 5
-    if (stage >= 7) return 5;
-    if (stage >= 4) return 4;
-    return 3;
+    // tank: 3 HP до стадии 4, затем 4 до стадии 7, затем 5 (из GameTuning)
+    const scaling = GameTuning.enemies.hpScaling.tank;
+    if (stage >= 7) return scaling.stage7;
+    if (stage >= 4) return scaling.stage4;
+    return GameTuning.enemies.types.tank.baseHp;
   }
 
   // getAliveTanksCount() moved to EnemySystem.getTankAliveCount()
@@ -843,11 +828,18 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  // Метод для будущей реализации смены оружия при подборе weapon-drop
-  // Пока не используется, но оставлен для будущей реализации
-  private switchWeaponTo(key: "pistol" | "shotgun"): void {
-    const weaponId: "PISTOL" | "SHOTGUN" =
-      key === "pistol" ? "PISTOL" : "SHOTGUN";
+  // Метод для смены оружия при подборе weapon-drop
+  private switchWeaponTo(key: "pistol" | "shotgun" | "smg"): void {
+    let weaponId: "PISTOL" | "SHOTGUN" | "SMG";
+    if (key === "pistol") {
+      weaponId = "PISTOL";
+    } else if (key === "shotgun") {
+      weaponId = "SHOTGUN";
+    } else if (key === "smg") {
+      weaponId = "SMG";
+    } else {
+      return; // Unknown weapon key
+    }
 
     if (this.weaponSystem.getCurrentWeaponId() === weaponId) {
       return;
@@ -1426,12 +1418,52 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  private onWeaponDropPicked(): void {
-    // TODO: Реализовать смену оружия при подборе weapon-drop
-    // Пока только логируем
-    // В будущем здесь будет вызов: this.switchWeaponTo("newWeaponType");
-    // Временно вызываем метод, чтобы TypeScript не считал его неиспользуемым
-    void this.switchWeaponTo;
+  private onWeaponDropPicked(weaponId: WeaponConfigId | null): void {
+    const currentWeaponId = this.weaponSystem.getCurrentWeaponId();
+
+    // Log pickup event (use systems context log if available, fallback to console.log)
+    const logFn = this.systems
+      ? ((this.systems as any).ctx as GameContext)?.log
+      : undefined;
+    const log = logFn ?? ((msg: string) => console.log(msg));
+
+    log(
+      `[WEAPON_DROP] picked weaponId=${
+        weaponId ?? "null"
+      } current=${currentWeaponId}`
+    );
+
+    // If weaponId is null, do nothing (only log)
+    if (weaponId === null) {
+      log(`[WEAPON_DROP] ignored reason=null`);
+      return;
+    }
+
+    // If weaponId matches current weapon, do nothing (log and return)
+    if (weaponId === currentWeaponId) {
+      log(`[WEAPON_DROP] ignored reason=same`);
+      return;
+    }
+
+    // Convert WeaponId ("PISTOL" | "SHOTGUN" | "SMG") to key ("pistol" | "shotgun" | "smg")
+    let key: "pistol" | "shotgun" | "smg";
+    if (weaponId === "PISTOL") {
+      key = "pistol";
+    } else if (weaponId === "SHOTGUN") {
+      key = "shotgun";
+    } else if (weaponId === "SMG") {
+      key = "smg";
+    } else {
+      // Unknown weaponId, log and return
+      log(`[WEAPON_DROP] ignored reason=unknown weaponId=${weaponId}`);
+      return;
+    }
+
+    // Log switch event
+    log(`[WEAPON_DROP] switch ${currentWeaponId} -> ${weaponId}`);
+
+    // Switch weapon (this will increment weaponSwitches and update UI)
+    this.switchWeaponTo(key);
   }
 
   private continueToNextStage(): void {

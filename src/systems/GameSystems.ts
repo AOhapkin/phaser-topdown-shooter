@@ -16,6 +16,8 @@ import { LootDropSystem } from "./LootDropSystem";
 import { OverlaySystem } from "./OverlaySystem";
 import { Enemy, EnemyType } from "../entities/Enemy";
 import { PhaseSettings, BurstState } from "./SpawnSystem";
+import type { WeaponId as WeaponConfigId } from "../config/WeaponsConfig";
+import { GameTuning } from "../config/GameTuning";
 
 /**
  * GameSystems container manages all game systems lifecycle
@@ -54,7 +56,7 @@ export interface GameSystemsCallbacks {
   onBurstEnd: () => void;
   onBurstStateChanged: (state: BurstState) => void;
   updatePlayerPickupRadius: () => void;
-  onWeaponDropPicked: () => void;
+  onWeaponDropPicked: (weaponId: WeaponConfigId | null) => void;
   log?: (msg: string) => void;
 }
 
@@ -153,6 +155,15 @@ export class GameSystems {
       onRapidFireMultiplierChanged: (_mult: number) => {
         // RAPID buff: fire rate multiplier is handled in WeaponSystem.tryShoot()
       },
+      onBuffChanged: (type: "rapid" | "double" | "freeze" | null) => {
+        // Notify WeaponSystem about buff changes (only for rapid)
+        // Use closure to access this.weaponSystem at call time (not at construction time)
+        // weaponSystem is created after buffSystem, so we check for existence
+        const weaponSystem = this.weaponSystem;
+        if ((type === "rapid" || type === null) && weaponSystem) {
+          weaponSystem.onBuffChanged(type);
+        }
+      },
       applyFreezeToEnemy: (enemy: Enemy) => {
         enemy.setFrozen(true);
       },
@@ -210,7 +221,7 @@ export class GameSystems {
         return this.stageSystem.getBurstState() === "burst";
       },
       getBurstSpeedMultiplier: () => {
-        return 1.12; // BURST_SPEED_BOOST
+        return GameTuning.spawn.burst.speedBoost;
       },
       isFreezeActive: () => {
         return this.buffSystem.isActive("freeze");
@@ -293,7 +304,13 @@ export class GameSystems {
         return this.buffSystem.isActive(type);
       },
       canBypassReload: () => {
-        return this.buffSystem.isActive("double");
+        // Check if any buff with bypassReload is active (data-driven from GameTuning)
+        return (
+          (this.buffSystem.isActive("double") &&
+            GameTuning.buffs.double.bypassReload) ||
+          (this.buffSystem.isActive("rapid") &&
+            GameTuning.buffs.rapid.bypassReload)
+        );
       },
       getScene: () => ctx.scene,
       getBulletsGroup: () => ctx.bulletsGroup,
@@ -305,6 +322,7 @@ export class GameSystems {
       onShotFired: (projectilesCount: number) => {
         this.matchStatsSystem.onShotFired(projectilesCount);
       },
+      log: (msg: string) => ctx.log?.(msg),
     });
 
     // 13. SpawnSystem (depends on ctx, enemySystem, stageSystem, callbacks)
@@ -329,7 +347,7 @@ export class GameSystems {
           ctx.log?.(msg);
         },
       },
-      200 // MIN_SPAWN_DELAY_MS
+      GameTuning.spawn.minDelayMs
     );
 
     // 14. LootDropSystem (depends on ctx, buffSystem, callbacks)
@@ -349,8 +367,10 @@ export class GameSystems {
       onBuffPicked: (type: "rapid" | "double" | "freeze") => {
         this.buffSystem.startBuff(type);
       },
-      onWeaponDropPicked: () => {
-        this.callbacks.onWeaponDropPicked();
+      getStage: () => this.stageSystem.getStage(),
+      getCurrentWeaponId: () => this.weaponSystem.getCurrentWeaponId(),
+      onWeaponDropPicked: (weaponId) => {
+        this.callbacks.onWeaponDropPicked(weaponId);
       },
       log: (msg: string) => ctx.log?.(msg),
     });

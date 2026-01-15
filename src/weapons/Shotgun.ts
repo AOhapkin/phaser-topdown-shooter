@@ -1,6 +1,7 @@
 import Phaser from "phaser";
 import { Weapon, WeaponStats } from "./types";
 import { Bullet } from "../entities/Bullet";
+import { WEAPONS_BY_ID } from "../config/WeaponsConfig";
 
 export class Shotgun implements Weapon {
   public readonly key: "shotgun" = "shotgun";
@@ -15,15 +16,34 @@ export class Shotgun implements Weapon {
   private _isReloading = false;
   private reloadStartTime = 0;
 
-  // Spread для конуса выстрела (в радианах)
-  private readonly spreadAngles = [-0.3, -0.15, 0, 0.15, 0.3]; // 5 пуль
+  private weaponDef = WEAPONS_BY_ID.get("SHOTGUN");
+  private spreadAngles: number[];
+  private projectileConfig: {
+    speed: number;
+    lifetimeMs: number;
+    baseRadius: number;
+  };
 
   constructor() {
-    this.fireRate = 800;
-    this.magazineSize = 2;
-    this.reloadTime = 1400;
+    if (!this.weaponDef) {
+      throw new Error("SHOTGUN weapon definition not found in WeaponsConfig");
+    }
+
+    this.fireRate = this.weaponDef.fireRateMs;
+    this.magazineSize = this.weaponDef.magazineSize;
+    this.reloadTime = this.weaponDef.reloadTimeMs;
 
     this.ammo = this.magazineSize;
+
+    // Spread для конуса выстрела (в радианах) - из WeaponsConfig
+    this.spreadAngles = this.weaponDef.spread?.angles ?? [-0.3, -0.15, 0, 0.15, 0.3];
+
+    // Store projectile config for bullet creation
+    this.projectileConfig = {
+      speed: this.weaponDef.projectile.speed,
+      lifetimeMs: this.weaponDef.projectile.lifetimeMs,
+      baseRadius: this.weaponDef.projectile.baseRadius,
+    };
   }
 
   getStats(): WeaponStats {
@@ -115,10 +135,10 @@ export class Shotgun implements Weapon {
       return;
     }
 
-    // Создаём 5 пуль в конусе
+    // Создаём пули в конусе (количество из spreadAngles)
     for (const spreadOffset of this.spreadAngles) {
       const bulletAngle = aimAngle + spreadOffset;
-      const bullet = new Bullet(scene, playerX, playerY);
+      const bullet = new Bullet(scene, playerX, playerY, this.projectileConfig);
       bullets.add(bullet);
       onBulletSpawned?.(bullet);
 

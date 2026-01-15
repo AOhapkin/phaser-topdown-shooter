@@ -1,11 +1,14 @@
 import { Weapon, WeaponKey } from "../weapons/types";
 import { BasicGun } from "../weapons/BasicGun";
 import { Shotgun } from "../weapons/Shotgun";
+import { SMG } from "../weapons/SMG";
 import { Bullet } from "../entities/Bullet";
 import { PlayerStateSystem } from "./PlayerStateSystem";
+import { WEAPONS_BY_ID } from "../config/WeaponsConfig";
+import { GameTuning } from "../config/GameTuning";
 import Phaser from "phaser";
 
-export type WeaponId = "PISTOL" | "SHOTGUN";
+export type WeaponId = "PISTOL" | "SHOTGUN" | "SMG";
 
 export interface WeaponSystemCallbacks {
   getIsActive: () => boolean; // game is running, not paused, not gameOver
@@ -21,6 +24,7 @@ export interface WeaponSystemCallbacks {
   scheduleDelayedCall: (delayMs: number, callback: () => void) => void;
   onShotFired: (count: number) => void; // for match stats
   onShotHit?: () => void; // for match stats (optional)
+  onBuffChanged?: (type: "rapid" | "double" | null) => void; // called when buff starts/ends
   log?: (msg: string) => void; // optional logging
 }
 
@@ -76,7 +80,16 @@ export class WeaponSystem {
   }
 
   switchWeapon(nextWeaponId: WeaponId): void {
-    const nextKey: WeaponKey = nextWeaponId === "PISTOL" ? "pistol" : "shotgun";
+    let nextKey: WeaponKey;
+    if (nextWeaponId === "PISTOL") {
+      nextKey = "pistol";
+    } else if (nextWeaponId === "SHOTGUN") {
+      nextKey = "shotgun";
+    } else if (nextWeaponId === "SMG") {
+      nextKey = "smg";
+    } else {
+      return; // Unknown weapon
+    }
 
     if (this.currentWeapon.key === nextKey) {
       return; // Already using this weapon
@@ -87,6 +100,8 @@ export class WeaponSystem {
       this.currentWeapon = new BasicGun({});
     } else if (nextKey === "shotgun") {
       this.currentWeapon = new Shotgun();
+    } else if (nextKey === "smg") {
+      this.currentWeapon = new SMG();
     }
 
     this.currentWeapon.refillAndReset();
@@ -114,10 +129,12 @@ export class WeaponSystem {
       return false;
     }
 
-    // Apply RAPID buff: reduce fire rate by 50%
+    // Apply RAPID buff: reduce fire rate (from GameTuning)
     const rapidActive = this.callbacks.isBuffActive("rapid");
     const baseFireRate = this.currentWeapon.getStats().fireRateMs;
-    const effectiveFireRate = rapidActive ? baseFireRate * 0.5 : baseFireRate;
+    const effectiveFireRate = rapidActive
+      ? baseFireRate * GameTuning.buffs.rapid.fireRateMultiplier
+      : baseFireRate;
 
     // Check fire rate with buff
     const weaponLastShot = (this.currentWeapon as any).lastShotTime || 0;
@@ -165,9 +182,11 @@ export class WeaponSystem {
         // Apply bullet size perk
         if (bulletSizeMult !== 1.0) {
           bullet.setScale(bulletSizeMult);
-          // Update hitbox size proportionally (base radius is 4)
+          // Update hitbox size proportionally (base radius from weapon config)
+          const weaponDef = WEAPONS_BY_ID.get(this.currentWeaponId);
+          const baseRadius = weaponDef?.projectile.baseRadius ?? 4;
           const body = bullet.body as Phaser.Physics.Arcade.Body;
-          body.setCircle(4 * bulletSizeMult);
+          body.setCircle(baseRadius * bulletSizeMult);
         }
       },
     });
@@ -175,8 +194,10 @@ export class WeaponSystem {
     // DOUBLE buff: weapon-specific second shot
     if (doubleActive && firstShotSucceeded && !weapon._isReloading) {
       if (isShotgun) {
-        // Shotgun: schedule second shot after 100ms delay (bypassAmmo for DOUBLE)
-        this.callbacks.scheduleDelayedCall(100, () => {
+        // Shotgun: schedule second shot after delay (from WeaponsConfig, bypassAmmo for DOUBLE)
+        const weaponDef = WEAPONS_BY_ID.get("SHOTGUN");
+        const delayMs = weaponDef?.doubleShotDelayMs ?? 100;
+        this.callbacks.scheduleDelayedCall(delayMs, () => {
           // Check buff still active and weapon still ready
           if (
             !this.callbacks.isBuffActive("double") ||
@@ -202,17 +223,24 @@ export class WeaponSystem {
               // Apply bullet size perk
               if (bulletSizeMult !== 1.0) {
                 bullet.setScale(bulletSizeMult);
+                const weaponDef = WEAPONS_BY_ID.get("SHOTGUN");
+                const baseRadius = weaponDef?.projectile.baseRadius ?? 4;
                 const body = bullet.body as Phaser.Physics.Arcade.Body;
-                body.setCircle(4 * bulletSizeMult);
+                body.setCircle(baseRadius * bulletSizeMult);
               }
             },
           });
         });
       } else {
         // Pistol: spawn second bullet immediately with spread (no extra ammo cost)
-        const spreadAngle = 0.08; // +/- 0.08 rad for double shot
+        const weaponDef = WEAPONS_BY_ID.get("PISTOL");
+        const spreadAngle = weaponDef?.spread?.doubleShotRad ?? 0.08;
         const bulletAngle = aimAngle + spreadAngle;
-        const bullet = new Bullet(scene, playerPos.x, playerPos.y);
+        const bullet = new Bullet(scene, playerPos.x, playerPos.y, {
+          speed: weaponDef?.projectile.speed,
+          lifetimeMs: weaponDef?.projectile.lifetimeMs,
+          baseRadius: weaponDef?.projectile.baseRadius,
+        });
         bullets.add(bullet);
 
         // Count as fired
@@ -225,8 +253,10 @@ export class WeaponSystem {
         // Apply bullet size perk
         if (bulletSizeMult !== 1.0) {
           bullet.setScale(bulletSizeMult);
+          const weaponDef = WEAPONS_BY_ID.get("PISTOL");
+          const baseRadius = weaponDef?.projectile.baseRadius ?? 4;
           const body = bullet.body as Phaser.Physics.Arcade.Body;
-          body.setCircle(4 * bulletSizeMult);
+          body.setCircle(baseRadius * bulletSizeMult);
         }
 
         // Set velocity
@@ -248,6 +278,37 @@ export class WeaponSystem {
 
   getCurrentWeapon(): Weapon {
     return this.currentWeapon;
+  }
+
+  /**
+   * Handle buff change notification (called from BuffSystem)
+   * Logs RAPID diagnostic information when buff starts/ends
+   */
+  onBuffChanged(type: "rapid" | "double" | null): void {
+    if (type === "rapid") {
+      this.logRapidDiagnostic("start");
+    } else if (type === null) {
+      // null means RAPID buff ended (called from BuffSystem.removeBuff for rapid)
+      this.logRapidDiagnostic("end");
+    }
+  }
+
+  /**
+   * Log RAPID diagnostic information
+   * Uses the same formula as tryShoot() for effectiveFireRate calculation
+   */
+  private logRapidDiagnostic(event: "start" | "end"): void {
+    const rapidActive = event === "start";
+    const baseFireRate = this.currentWeapon.getStats().fireRateMs;
+    // Use the same formula as in tryShoot()
+    const effectiveFireRate = rapidActive
+      ? baseFireRate * GameTuning.buffs.rapid.fireRateMultiplier
+      : baseFireRate;
+    const reloadBypass = rapidActive && GameTuning.buffs.rapid.bypassReload;
+
+    this.callbacks.log?.(
+      `[RAPID_DIAG] event=${event} weapon=${this.currentWeaponId} buffActive=${rapidActive} baseFireRateMs=${baseFireRate} effectiveFireRateMs=${effectiveFireRate.toFixed(1)} rapidMult=${GameTuning.buffs.rapid.fireRateMultiplier} reloadBypass=${reloadBypass}`
+    );
   }
 }
 

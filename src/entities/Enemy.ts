@@ -1,6 +1,7 @@
 import Phaser from "phaser";
 import { Player } from "./Player";
 import { HealthBar } from "../ui/HealthBar";
+import { GameTuning } from "../config/GameTuning";
 
 export type EnemyType = "runner" | "tank" | "fast" | "heavy";
 
@@ -20,35 +21,12 @@ type EnemyMovementConfig = {
   orbitSign: 1 | -1;
 };
 
+// Movement configs moved to GameTuning.enemies.movement
 const MOVEMENT_CONFIGS: Record<EnemyType, Omit<EnemyMovementConfig, "orbitSign">> = {
-  runner: {
-    orbitRadius: 90,
-    separationRadius: 32,
-    orbitStrength: 55,
-    separationStrength: 140,
-    steeringSharpness: 10,
-  },
-  tank: {
-    orbitRadius: 110,
-    separationRadius: 44,
-    orbitStrength: 35,
-    separationStrength: 110,
-    steeringSharpness: 8,
-  },
-  fast: {
-    orbitRadius: 90,
-    separationRadius: 32,
-    orbitStrength: 55,
-    separationStrength: 140,
-    steeringSharpness: 10,
-  },
-  heavy: {
-    orbitRadius: 110,
-    separationRadius: 44,
-    orbitStrength: 35,
-    separationStrength: 110,
-    steeringSharpness: 8,
-  },
+  runner: GameTuning.enemies.movement.runner,
+  tank: GameTuning.enemies.movement.tank,
+  fast: GameTuning.enemies.movement.fast,
+  heavy: GameTuning.enemies.movement.heavy,
 };
 
 // Global counter for enemy IDs
@@ -64,7 +42,6 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
   public readonly id: number; // Stable unique ID for hit tracking
   private maxHealth!: number; // Инициализируется в конструкторе
   private health!: number; // Инициализируется в конструкторе
-  private baseMaxHealth = 1;
   private stage = 1; // Используется для HP scaling
 
   public getType(): EnemyType {
@@ -100,29 +77,23 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
   }
 
   private computeMaxHealth(): number {
-    // Используем stage для HP scaling (каждые 3 стадии)
+    // Используем stage для HP scaling (из GameTuning)
     if (this.type === "runner") {
-      if (this.stage >= 7) return 3;
-      if (this.stage >= 4) return 2;
-      return 1;
+      const scaling = GameTuning.enemies.hpScaling.runner;
+      if (this.stage >= 7) return scaling.stage7;
+      if (this.stage >= 4) return scaling.stage4;
+      return GameTuning.enemies.types.runner.baseHp;
     }
 
     if (this.type === "tank") {
-      if (this.stage >= 7) return 5;
-      if (this.stage >= 4) return 4;
-      return 3; // Минимум 3 HP для tank
+      const scaling = GameTuning.enemies.hpScaling.tank;
+      if (this.stage >= 7) return scaling.stage7;
+      if (this.stage >= 4) return scaling.stage4;
+      return GameTuning.enemies.types.tank.baseHp;
     }
 
-    // fast и heavy пока не скейлятся
-    if (this.type === "fast") {
-      return 1;
-    }
-
-    if (this.type === "heavy") {
-      return 5;
-    }
-
-    return this.baseMaxHealth;
+    // fast и heavy пока не скейлятся (используют baseHp)
+    return GameTuning.enemies.types[this.type].baseHp;
   }
 
   private computeSpeed(): number {
@@ -187,31 +158,17 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
     const body = this.body as Phaser.Physics.Arcade.Body;
     body.setCollideWorldBounds(true);
 
-    // Базовые характеристики по типу
-    if (this.type === "runner") {
-      this.baseMaxHealth = 1;
-      this.baseSpeed = 110;
-      this.setScale(1);
+    // Базовые характеристики по типу (из GameTuning)
+    const typeConfig = GameTuning.enemies.types[this.type];
+    // baseMaxHealth removed - not used, maxHealth is computed via computeMaxHealth()
+    this.baseSpeed = typeConfig.baseSpeed;
+    this.setScale(typeConfig.scale);
+    if (typeConfig.tint !== undefined) {
+      this.setTint(typeConfig.tint);
+      this.baseTint = typeConfig.tint;
+    } else {
       this.clearTint();
       this.baseTint = undefined;
-    } else if (this.type === "tank") {
-      this.baseMaxHealth = 3;
-      this.baseSpeed = 60;
-      this.setScale(1.3);
-      this.setTint(0x4fc3f7);
-      this.baseTint = 0x4fc3f7;
-    } else if (this.type === "fast") {
-      this.baseMaxHealth = 1;
-      this.baseSpeed = 150;
-      this.setScale(0.9);
-      this.setTint(0xffeb3b); // Жёлтый
-      this.baseTint = 0xffeb3b;
-    } else if (this.type === "heavy") {
-      this.baseMaxHealth = 5;
-      this.baseSpeed = 40;
-      this.setScale(1.5);
-      this.setTint(0x9c27b0); // Фиолетовый
-      this.baseTint = 0x9c27b0;
     }
 
     this.baseAlpha = 1;

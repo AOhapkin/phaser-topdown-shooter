@@ -1,14 +1,9 @@
 import Phaser from "phaser";
 import { PERKS_CONFIG } from "../config/PerksConfig";
+import { PerkId, PerkDef, PerkEffect } from "../types/perks";
 
-export type PerkId = "pierce" | "knockback" | "magnet" | "heal_on_clear" | "bullet_size";
-
-export interface PerkDef {
-  id: PerkId;
-  title: string;
-  desc: string;
-  maxLevel?: number;
-}
+// Re-export types for convenience (backward compatibility)
+export type { PerkId, PerkDef, PerkEffect };
 
 export interface PerkSystemCallbacks {
   /**
@@ -44,6 +39,13 @@ export class PerkSystem {
    */
   getAllDefs(): PerkDef[] {
     return PERKS_CONFIG;
+  }
+
+  /**
+   * Get perk definition by ID
+   */
+  getDef(id: PerkId): PerkDef | undefined {
+    return PERKS_CONFIG.find((def) => def.id === id);
   }
 
   /**

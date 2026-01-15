@@ -1,24 +1,12 @@
 import Phaser from "phaser";
 import { LootPickup, LootType } from "../entities/LootPickup";
+import { GameTuning } from "../config/GameTuning";
+import type { WeaponId } from "../config/WeaponsConfig";
+import { pickWeaponDropId } from "../config/WeaponDropsConfig";
 
 export type LootKind = "buff" | "weapon";
 export type BuffLootId = "buff-freeze" | "buff-rapid" | "buff-double";
 export type WeaponLootId = "weapon-drop";
-
-// Buff drop parameters (moved from GameScene)
-const BUFF_DROP_COOLDOWN_MS = 12000; // Global cooldown for buff drops (ms)
-const BUFF_DROP_CHANCE = 0.18; // Chance to attempt buff drop on event (e.g., enemy kill)
-const BUFF_MAX_ON_MAP = 1; // Maximum buff loot items on map simultaneously
-
-// Buff type weights (for selection when drop is attempted)
-// Total: 100% (freeze: 45%, rapid: 35%, double: 20%)
-const BUFF_FREEZE_WEIGHT = 0.45;
-const BUFF_RAPID_WEIGHT = 0.35;
-const BUFF_DOUBLE_WEIGHT = 0.2;
-
-// Weapon-drop spawn constraints (moved from GameScene)
-const WEAPON_DROP_BASE_CHANCE = 0.003; // 0.3% per enemy death
-const WEAPON_DROP_COOLDOWN_MS = 30000; // 30 seconds cooldown
 
 export interface LootDropSystemCallbacks {
   getIsActive: () => boolean;
@@ -29,7 +17,9 @@ export interface LootDropSystemCallbacks {
   isBuffActive: (type: "rapid" | "double" | "freeze") => boolean;
   isWeaponDropAllowed: () => boolean;
   onBuffPicked: (type: "rapid" | "double" | "freeze") => void;
-  onWeaponDropPicked: () => void;
+  getStage: () => number;
+  getCurrentWeaponId: () => WeaponId | null;
+  onWeaponDropPicked: (weaponId: WeaponId | null) => void;
   log: (msg: string) => void;
 }
 
@@ -73,16 +63,20 @@ export class LootDropSystem {
 
     // 1) Roll for drop chance (if chance fails, don't log anything)
     const dropRoll = Math.random();
-    if (dropRoll >= BUFF_DROP_CHANCE) {
+    if (dropRoll >= GameTuning.loot.buff.dropChance) {
       return; // No drop attempt, no log
     }
 
     // 2) Check cooldown (if on cooldown, count as skip for throttled logs)
-    if (now - this.lastBuffDropAtMs < BUFF_DROP_COOLDOWN_MS) {
-      // Throttle cooldown logs: log at most once per 3 seconds, or every 10th skip
+    if (now - this.lastBuffDropAtMs < GameTuning.loot.buff.cooldownMs) {
+      // Throttle cooldown logs: log at most once per interval, or every Nth skip
       this.cooldownLogSkipCount++;
       const timeSinceLastLog = now - this.lastCooldownLogTime;
-      if (timeSinceLastLog >= 3000 || this.cooldownLogSkipCount >= 10) {
+      if (
+        timeSinceLastLog >= GameTuning.loot.logThrottle.cooldownLogIntervalMs ||
+        this.cooldownLogSkipCount >=
+          GameTuning.loot.logThrottle.cooldownLogSkipThreshold
+      ) {
         this.callbacks.log(
           `[LOOT] buff drop skipped (cooldown) x${this.cooldownLogSkipCount}`
         );
@@ -96,23 +90,21 @@ export class LootDropSystem {
     const activeBuffLootCount = Array.from(this.activeBuffLoot).filter(
       (loot) => loot && loot.active
     ).length;
-    if (activeBuffLootCount >= BUFF_MAX_ON_MAP) {
+    if (activeBuffLootCount >= GameTuning.loot.buff.maxActive) {
       this.callbacks.log(`[LOOT] buff drop skipped (limit)`);
       return;
     }
 
-    // 4) Roll for buff type using weights (freeze: 45%, rapid: 35%, double: 20%)
+    // 4) Roll for buff type using weights from GameTuning
     const typeRoll = Math.random();
     let buffType: LootType | null = null;
+    const weights = GameTuning.loot.buff.weights;
 
-    if (typeRoll < BUFF_FREEZE_WEIGHT) {
+    if (typeRoll < weights.freeze) {
       buffType = "buff-freeze";
-    } else if (typeRoll < BUFF_FREEZE_WEIGHT + BUFF_RAPID_WEIGHT) {
+    } else if (typeRoll < weights.freeze + weights.rapid) {
       buffType = "buff-rapid";
-    } else if (
-      typeRoll <
-      BUFF_FREEZE_WEIGHT + BUFF_RAPID_WEIGHT + BUFF_DOUBLE_WEIGHT
-    ) {
+    } else if (typeRoll < weights.freeze + weights.rapid + weights.double) {
       buffType = "buff-double";
     } else {
       // Fallback (shouldn't happen if weights sum to 1.0)
@@ -130,7 +122,10 @@ export class LootDropSystem {
     }
 
     // 6) Spawn buff loot
-    const ttlMs = Phaser.Math.Between(8000, 12000);
+    const ttlMs = Phaser.Math.Between(
+      GameTuning.loot.buff.ttlMinMs,
+      GameTuning.loot.buff.ttlMaxMs
+    );
     const buffLoot = new LootPickup(
       this.callbacks.getScene(),
       x,
@@ -161,8 +156,19 @@ export class LootDropSystem {
 
     const now = this.callbacks.getTimeNow();
 
+    // Use debug overrides if enabled
+    const useDebug =
+      GameTuning.debug.enabled &&
+      GameTuning.debug.weaponDropTest.forceHighChance;
+    const cooldownMs = useDebug
+      ? GameTuning.debug.weaponDropTest.cooldownMs
+      : GameTuning.loot.weaponDrop.cooldownMs;
+    const baseChance = useDebug
+      ? GameTuning.debug.weaponDropTest.baseChance
+      : GameTuning.loot.weaponDrop.baseChance;
+
     // Проверка cooldown
-    if (now - this.lastWeaponDropTime < WEAPON_DROP_COOLDOWN_MS) {
+    if (now - this.lastWeaponDropTime < cooldownMs) {
       return;
     }
 
@@ -177,7 +183,7 @@ export class LootDropSystem {
     }
 
     // Базовый шанс выпадения
-    if (Math.random() >= WEAPON_DROP_BASE_CHANCE) {
+    if (Math.random() >= baseChance) {
       return;
     }
 
@@ -192,9 +198,57 @@ export class LootDropSystem {
     this.callbacks.getLootGroup().add(weaponLoot);
     this.lastWeaponDropTime = now;
 
-    // Log weapon drop with TTL
-    const ttlMs = Phaser.Math.Between(8000, 12000);
+    // Log weapon drop with TTL (use debug TTL if enabled)
+    const ttlMinMs = useDebug
+      ? GameTuning.debug.weaponDropTest.ttlMinMs
+      : GameTuning.loot.weaponDrop.ttlMinMs;
+    const ttlMaxMs = useDebug
+      ? GameTuning.debug.weaponDropTest.ttlMaxMs
+      : GameTuning.loot.weaponDrop.ttlMaxMs;
+    const ttlMs = Phaser.Math.Between(ttlMinMs, ttlMaxMs);
     this.callbacks.log(`[LOOT] weapon-drop dropped: ttl=${ttlMs}ms`);
+  }
+
+  /**
+   * Debug method: manually spawn weapon-drop at specified position
+   * Bypasses all checks (cooldown, chance, limits) for testing
+   */
+  spawnWeaponLootDebug(x: number, y: number): void {
+    if (!this.callbacks.getIsActive()) {
+      return;
+    }
+
+    // Use debug TTL if enabled, otherwise use normal TTL
+    const useDebug =
+      GameTuning.debug.enabled &&
+      GameTuning.debug.weaponDropTest.forceHighChance;
+    const ttlMinMs = useDebug
+      ? GameTuning.debug.weaponDropTest.ttlMinMs
+      : GameTuning.loot.weaponDrop.ttlMinMs;
+    const ttlMaxMs = useDebug
+      ? GameTuning.debug.weaponDropTest.ttlMaxMs
+      : GameTuning.loot.weaponDrop.ttlMaxMs;
+
+    // Спавним weapon-drop (bypasses all checks)
+    const weaponLoot = new LootPickup(
+      this.callbacks.getScene(),
+      x,
+      y,
+      "weapon-drop",
+      this.callbacks.log
+    );
+    this.callbacks.getLootGroup().add(weaponLoot);
+    this.lastWeaponDropTime = this.callbacks.getTimeNow();
+
+    const ttlMs = Phaser.Math.Between(ttlMinMs, ttlMaxMs);
+    // Only log [DEBUG] if debug is enabled
+    if (useDebug) {
+      this.callbacks.log(
+        `[DEBUG] spawn weapon-drop at x=${x.toFixed(1)} y=${y.toFixed(
+          1
+        )} ttl=${ttlMs}ms`
+      );
+    }
   }
 
   /**
@@ -207,7 +261,13 @@ export class LootDropSystem {
       case "weapon-drop":
         this.callbacks.log("[LOOT] weapon-drop picked");
         this.lastWeaponDropTime = this.callbacks.getTimeNow(); // Обновляем cooldown при подборе
-        this.callbacks.onWeaponDropPicked();
+        {
+          const weaponId = pickWeaponDropId({
+            stage: this.callbacks.getStage(),
+            currentWeaponId: this.callbacks.getCurrentWeaponId(),
+          });
+          this.callbacks.onWeaponDropPicked(weaponId);
+        }
         break;
       case "buff-rapid":
         this.callbacks.log(`[LOOT] buff picked: buff-rapid`);
@@ -259,4 +319,3 @@ export class LootDropSystem {
     });
   }
 }
-

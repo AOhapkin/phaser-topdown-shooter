@@ -1,6 +1,6 @@
 import Phaser from "phaser";
 
-export type WeaponKey = "pistol" | "shotgun";
+export type WeaponKey = "pistol" | "shotgun" | "smg";
 
 export type WeaponStats = {
   name: string; // "PISTOL" / "SHOTGUN"

@@ -1,12 +1,14 @@
 import Phaser from "phaser";
+import { GameTuning } from "../config/GameTuning";
 
-export type LootType = "heal" | "speed" | "weapon-drop" | "buff-rapid" | "buff-double" | "buff-pierce" | "buff-freeze";
-
-// Loot TTL constants
-const LOOT_TTL_MIN_MS = 8000;
-const LOOT_TTL_MAX_MS = 12000;
-const LOOT_BLINK_LAST_MS = 1500; // Blink starts 1.5 seconds before expiration
-const LOOT_BLINK_INTERVAL_MS = 120;
+export type LootType =
+  | "heal"
+  | "speed"
+  | "weapon-drop"
+  | "buff-rapid"
+  | "buff-double"
+  | "buff-pierce"
+  | "buff-freeze";
 
 export class LootPickup extends Phaser.Physics.Arcade.Sprite {
   public lootType: LootType;
@@ -40,11 +42,24 @@ export class LootPickup extends Phaser.Physics.Arcade.Sprite {
     this.lootType = lootType;
     this.log = log;
 
-    // TTL tracking: random 8-12 seconds
+    // TTL tracking: random range from GameTuning
+    // Use appropriate TTL range based on loot type
     this.spawnTime = scene.time.now;
-    const ttlMs = Phaser.Math.Between(LOOT_TTL_MIN_MS, LOOT_TTL_MAX_MS);
+    let ttlMs: number;
+    if (lootType === "weapon-drop") {
+      ttlMs = Phaser.Math.Between(
+        GameTuning.loot.weaponDrop.ttlMinMs,
+        GameTuning.loot.weaponDrop.ttlMaxMs
+      );
+    } else {
+      // For buff loot and other types, use buff TTL range
+      ttlMs = Phaser.Math.Between(
+        GameTuning.loot.buff.ttlMinMs,
+        GameTuning.loot.buff.ttlMaxMs
+      );
+    }
     this.expireTime = this.spawnTime + ttlMs;
-    this.blinkStartTime = this.expireTime - LOOT_BLINK_LAST_MS;
+    this.blinkStartTime = this.expireTime - GameTuning.loot.visual.blinkLastMs;
     this.lastBlinkToggle = 0;
     this.isBlinking = false;
 
@@ -106,7 +121,7 @@ export class LootPickup extends Phaser.Physics.Arcade.Sprite {
       repeat: -1,
       ease: "sine.inOut",
     });
-    
+
     // Для weapon-drop также анимируем текст
     if (lootType === "weapon-drop" && this.weaponDropText) {
       scene.tweens.add({
@@ -151,10 +166,10 @@ export class LootPickup extends Phaser.Physics.Arcade.Sprite {
     }
     super.destroy(fromScene);
   }
-  
+
   preUpdate(time: number, delta: number): void {
     super.preUpdate(time, delta);
-    
+
     // Обновляем позицию текста для weapon-drop
     if (this.lootType === "weapon-drop" && this.weaponDropText) {
       this.weaponDropText.setPosition(this.x, this.y);
@@ -172,7 +187,10 @@ export class LootPickup extends Phaser.Physics.Arcade.Sprite {
 
     // TTL: мигание перед исчезновением
     if (time >= this.blinkStartTime && time < this.expireTime) {
-      if (time - this.lastBlinkToggle >= LOOT_BLINK_INTERVAL_MS) {
+      if (
+        time - this.lastBlinkToggle >=
+        GameTuning.loot.visual.blinkIntervalMs
+      ) {
         this.isBlinking = !this.isBlinking;
         this.lastBlinkToggle = time;
         const alpha = this.isBlinking ? 0.3 : 1.0;
@@ -211,4 +229,3 @@ export class LootPickup extends Phaser.Physics.Arcade.Sprite {
     }
   }
 }
-

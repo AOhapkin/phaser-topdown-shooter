@@ -3,8 +3,8 @@ import { Weapon, WeaponStats } from "./types";
 import { Bullet } from "../entities/Bullet";
 import { WEAPONS_BY_ID } from "../config/WeaponsConfig";
 
-export class BasicGun implements Weapon {
-  public readonly key: "pistol" = "pistol";
+export class SMG implements Weapon {
+  public readonly key: "smg" = "smg";
 
   private fireRate: number;
   private lastShotTime = 0;
@@ -16,7 +16,7 @@ export class BasicGun implements Weapon {
   private _isReloading = false;
   private reloadStartTime = 0;
 
-  private weaponDef = WEAPONS_BY_ID.get("PISTOL");
+  private weaponDef = WEAPONS_BY_ID.get("SMG");
   private projectileConfig: {
     speed: number;
     lifetimeMs: number;
@@ -29,7 +29,7 @@ export class BasicGun implements Weapon {
     reloadTime?: number;
   }) {
     if (!this.weaponDef) {
-      throw new Error("PISTOL weapon definition not found in WeaponsConfig");
+      throw new Error("SMG weapon definition not found in WeaponsConfig");
     }
 
     this.fireRate = options?.fireRate ?? this.weaponDef.fireRateMs;
@@ -48,7 +48,7 @@ export class BasicGun implements Weapon {
 
   getStats(): WeaponStats {
     return {
-      name: "PISTOL",
+      name: "SMG",
       magazineSize: this.magazineSize,
       reloadTimeMs: this.reloadTime,
       fireRateMs: this.fireRate,
@@ -89,7 +89,7 @@ export class BasicGun implements Weapon {
 
   // Методы для улучшений с проверкой капов (из WeaponsConfig)
   decreaseFireRate(amount: number): boolean {
-    const minFireRate = this.weaponDef?.limits?.minFireRateMs ?? 140;
+    const minFireRate = this.weaponDef?.limits?.minFireRateMs ?? 80;
     const newRate = this.fireRate - amount;
     if (newRate < minFireRate) {
       return false;
@@ -98,13 +98,8 @@ export class BasicGun implements Weapon {
     return true;
   }
 
-  canDecreaseFireRate(amount: number): boolean {
-    const minFireRate = this.weaponDef?.limits?.minFireRateMs ?? 140;
-    return this.fireRate - amount >= minFireRate;
-  }
-
   decreaseReloadTime(amount: number): boolean {
-    const minReloadTime = this.weaponDef?.limits?.minReloadTimeMs ?? 600;
+    const minReloadTime = this.weaponDef?.limits?.minReloadTimeMs ?? 800;
     const newTime = this.reloadTime - amount;
     if (newTime < minReloadTime) {
       return false;
@@ -113,13 +108,8 @@ export class BasicGun implements Weapon {
     return true;
   }
 
-  canDecreaseReloadTime(amount: number): boolean {
-    const minReloadTime = this.weaponDef?.limits?.minReloadTimeMs ?? 600;
-    return this.reloadTime - amount >= minReloadTime;
-  }
-
   increaseMagazine(amount: number): boolean {
-    const maxMagazine = this.weaponDef?.limits?.maxMagazineSize ?? 10;
+    const maxMagazine = this.weaponDef?.limits?.maxMagazineSize ?? 40;
     const newSize = this.magazineSize + amount;
     if (newSize > maxMagazine) {
       return false;
@@ -132,30 +122,19 @@ export class BasicGun implements Weapon {
     return true;
   }
 
+  canDecreaseFireRate(amount: number): boolean {
+    const minFireRate = this.weaponDef?.limits?.minFireRateMs ?? 80;
+    return this.fireRate - amount >= minFireRate;
+  }
+
+  canDecreaseReloadTime(amount: number): boolean {
+    const minReloadTime = this.weaponDef?.limits?.minReloadTimeMs ?? 800;
+    return this.reloadTime - amount >= minReloadTime;
+  }
+
   canIncreaseMagazine(amount: number): boolean {
-    const maxMagazine = this.weaponDef?.limits?.maxMagazineSize ?? 10;
+    const maxMagazine = this.weaponDef?.limits?.maxMagazineSize ?? 40;
     return this.magazineSize + amount <= maxMagazine;
-  }
-
-  private startReload(time: number) {
-    if (this._isReloading) {
-      return;
-    }
-
-    this._isReloading = true;
-    this.reloadStartTime = time;
-  }
-
-  private updateReload(time: number) {
-    if (!this._isReloading) {
-      return;
-    }
-
-    if (time >= this.reloadStartTime + this.reloadTime) {
-      this._isReloading = false;
-      this.ammo = this.magazineSize;
-      this.reloadStartTime = 0;
-    }
   }
 
   tryFire(args: {
@@ -165,46 +144,72 @@ export class BasicGun implements Weapon {
     playerY: number;
     aimAngle: number;
     bullets: Phaser.Physics.Arcade.Group;
-    onBulletSpawned?: (bullet: import("../entities/Bullet").Bullet) => void;
-    bypassAmmo?: boolean; // DOUBLE buff: infinite ammo
+    onBulletSpawned?: (bullet: Bullet) => void;
+    bypassAmmo?: boolean;
   }): void {
     const { scene, time, playerX, playerY, aimAngle, bullets, onBulletSpawned, bypassAmmo } = args;
 
     this.updateReload(time);
 
-    if (this._isReloading && !bypassAmmo) {
-      return;
-    }
-
+    // Check fire rate
     if (time < this.lastShotTime + this.fireRate) {
       return;
     }
 
-    if (this.ammo <= 0 && !bypassAmmo) {
-      this.startReload(time);
+    // Check ammo (unless bypassed by DOUBLE buff)
+    if (!bypassAmmo && this.ammo <= 0) {
+      if (!this._isReloading) {
+        this.startReload(time);
+      }
       return;
     }
 
+    // Check if reloading (unless bypassed)
+    if (this._isReloading && !bypassAmmo) {
+      return;
+    }
+
+    // Fire single bullet
     const bullet = new Bullet(scene, playerX, playerY, this.projectileConfig);
     bullets.add(bullet);
     onBulletSpawned?.(bullet);
 
+    // Set velocity
     const speed = bullet.speed;
     const vx = Math.cos(aimAngle) * speed;
     const vy = Math.sin(aimAngle) * speed;
-
     const body = bullet.body as Phaser.Physics.Arcade.Body;
     body.setVelocity(vx, vy);
     body.setAllowGravity(false);
 
-    this.lastShotTime = time;
-    
-    // DOUBLE buff: не тратим патроны и не запускаем перезарядку
+    // Update state
     if (!bypassAmmo) {
-      this.ammo -= 1;
-      if (this.ammo <= 0) {
-        this.startReload(time);
-      }
+      this.ammo--;
+    }
+    this.lastShotTime = time;
+
+    // Auto-reload when empty
+    if (!bypassAmmo && this.ammo <= 0 && !this._isReloading) {
+      this.startReload(time);
+    }
+  }
+
+  private startReload(time: number): void {
+    if (this._isReloading) {
+      return;
+    }
+    this._isReloading = true;
+    this.reloadStartTime = time;
+  }
+
+  updateReload(time: number): void {
+    if (!this._isReloading) {
+      return;
+    }
+    if (time >= this.reloadStartTime + this.reloadTime) {
+      this.ammo = this.magazineSize;
+      this._isReloading = false;
+      this.reloadStartTime = 0;
     }
   }
 }

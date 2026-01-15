@@ -1,4 +1,5 @@
 import { Enemy } from "../entities/Enemy";
+import { GameTuning } from "../config/GameTuning";
 
 export type BuffType = "rapid" | "double" | "freeze";
 
@@ -7,18 +8,13 @@ export interface BuffDef {
   durationMs: number;
 }
 
-// Buff durations (ms) - matching GameScene constants
-const BUFF_RAPID_DURATION_MS = 8000;
-const BUFF_DOUBLE_DURATION_MS = 10000;
-const BUFF_FREEZE_DURATION_MS = 6000;
-const BUFF_MAX_DURATION_MS = 20000; // Cap for stacking
-
 export interface BuffSystemCallbacks {
   getIsActive: () => boolean; // game is running, not paused, not gameOver
   getTimeNow: () => number; // scene.time.now
   getEnemies: () => Enemy[]; // only alive/active enemies
   onReloadBypassEnabled: (enabled: boolean) => void; // for DOUBLE
-  onRapidFireMultiplierChanged: (mult: number) => void; // for RAPID (0.5 when active, 1.0 when inactive)
+  onRapidFireMultiplierChanged: (mult: number) => void; // for RAPID (multiplier from GameTuning.buffs.rapid.fireRateMultiplier when active, 1.0 when inactive)
+  onBuffChanged?: (type: BuffType | null) => void; // called when buff starts (type) or ends (null for rapid)
   applyFreezeToEnemy: (enemy: Enemy) => void;
   removeFreezeFromEnemy: (enemy: Enemy) => void;
   isEnemyFreezable?: (enemy: Enemy) => boolean; // optional check
@@ -66,20 +62,20 @@ export class BuffSystem {
     const now = this.callbacks.getTimeNow();
     const existing = this.active.get(type);
 
-    // Get duration for this buff type
+    // Get duration for this buff type from GameTuning
     let durationMs: number;
     switch (type) {
       case "rapid":
-        durationMs = BUFF_RAPID_DURATION_MS;
+        durationMs = GameTuning.buffs.rapid.durationMs;
         break;
       case "double":
-        durationMs = BUFF_DOUBLE_DURATION_MS;
+        durationMs = GameTuning.buffs.double.durationMs;
         break;
       case "freeze":
-        durationMs = BUFF_FREEZE_DURATION_MS;
+        durationMs = GameTuning.buffs.freeze.durationMs;
         break;
       default:
-        durationMs = 8000; // fallback
+        durationMs = GameTuning.buffs.rapid.durationMs; // fallback
     }
 
     if (existing) {
@@ -93,9 +89,20 @@ export class BuffSystem {
           `[BUFF] refresh type=${type} remain=${remaining.toFixed(0)}ms`
         );
       } else {
+        // Get max duration for this buff type
+        // Note: "double" is handled above, so here type is "rapid" | "freeze"
+        let maxDurationMs: number;
+        if (type === "rapid") {
+          maxDurationMs = GameTuning.buffs.rapid.maxDurationMs;
+        } else if (type === "freeze") {
+          maxDurationMs = GameTuning.buffs.freeze.maxDurationMs;
+        } else {
+          // Fallback (should not happen due to type narrowing)
+          maxDurationMs = GameTuning.buffs.rapid.maxDurationMs;
+        }
         const newEndTime = Math.min(
           existing.endTime + durationMs,
-          now + BUFF_MAX_DURATION_MS
+          now + maxDurationMs
         );
         const remaining = newEndTime - now;
         this.active.set(type, { endTime: newEndTime });
@@ -121,7 +128,16 @@ export class BuffSystem {
         this.callbacks.log(`[BUFF] double: reload bypass enabled`);
         this.callbacks.onReloadBypassEnabled(true);
       } else if (type === "rapid") {
-        this.callbacks.onRapidFireMultiplierChanged(0.5); // 50% fire rate
+        this.callbacks.onRapidFireMultiplierChanged(
+          GameTuning.buffs.rapid.fireRateMultiplier
+        );
+        // RAPID buff: enable reload bypass if configured
+        if (GameTuning.buffs.rapid.bypassReload) {
+          this.callbacks.log(`[BUFF] rapid: reload bypass enabled`);
+          this.callbacks.onReloadBypassEnabled(true);
+        }
+        // Notify WeaponSystem about RAPID activation
+        this.callbacks.onBuffChanged?.(type);
       }
     }
   }
@@ -154,6 +170,13 @@ export class BuffSystem {
       this.callbacks.onReloadBypassEnabled(false);
     } else if (type === "rapid") {
       this.callbacks.onRapidFireMultiplierChanged(1.0); // restore normal fire rate
+      // RAPID buff: disable reload bypass if configured
+      if (GameTuning.buffs.rapid.bypassReload) {
+        this.callbacks.log(`[BUFF] rapid: reload bypass disabled`);
+        this.callbacks.onReloadBypassEnabled(false);
+      }
+      // Notify WeaponSystem about RAPID deactivation (before removing from active)
+      this.callbacks.onBuffChanged?.(null);
     }
   }
 
