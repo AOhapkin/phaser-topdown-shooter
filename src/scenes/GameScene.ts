@@ -21,6 +21,13 @@ import { GameContext } from "../systems/GameContext";
 import type { WeaponId as WeaponConfigId } from "../config/WeaponsConfig";
 import { GameTuning } from "../config/GameTuning";
 import { GameSystems, GameSystemsCallbacks } from "../systems/GameSystems";
+import {
+  CAMPAIGN_MAIN,
+  CHAPTERS_BY_ID,
+  getNextMissionId,
+  MISSIONS_BY_ID,
+} from "../config/CampaignConfig";
+import type { MissionId } from "../types/campaign";
 
 import playerSvg from "../assets/player.svg?url";
 import enemySvg from "../assets/enemy.svg?url";
@@ -89,10 +96,6 @@ export class GameScene extends Phaser.Scene {
   // Match state flags moved to MatchStateSystem
   // Legacy fields removed - use this.systems.matchStateSystem instead
   private gameOverText?: Phaser.GameObjects.Text;
-  private startOverlay?: Phaser.GameObjects.Rectangle;
-  private startTitleText?: Phaser.GameObjects.Text;
-  private startHintText?: Phaser.GameObjects.Text;
-  private startHintTween?: Phaser.Tweens.Tween;
   // suppressShootingUntil moved to WeaponSystem
   // TODO: Remove after full integration
   // private suppressShootingUntil = 0;
@@ -164,8 +167,19 @@ export class GameScene extends Phaser.Scene {
 
   // Game systems container
   private systems!: GameSystems;
+  private callbacks!: GameSystemsCallbacks;
 
   private debugLogs = false; // выключить шумные логи
+
+  // UI State machine
+  private uiState: "playing" | "mission_result" = "playing";
+
+  // Campaign mode
+  private gameMode: "sandbox" | "campaign" = "sandbox";
+  private missionCompleteOverlay?: Phaser.GameObjects.Container;
+  private gameplayPaused = false; // Gameplay starts immediately when scene starts
+  private isEnding = false; // Guard to prevent multiple death handlers
+  private missionCompleteCallback?: (result: "success" | "fail", missionId: MissionId) => void;
 
   // Weapon-drop and buff loot tracking moved to LootDropSystem
 
@@ -186,8 +200,12 @@ export class GameScene extends Phaser.Scene {
     this.load.image("loot-speed", speedSvg);
   }
 
-  create() {
+  create(data?: { mode?: "sandbox" | "campaign"; missionId?: MissionId }) {
     const { width, height } = this.scale;
+
+    // Determine game mode from data
+    const mode = data?.mode || "sandbox";
+    this.gameMode = mode;
 
     // Резюмим физику при каждом старте/рестарте сцены
     this.physics.resume();
@@ -402,8 +420,21 @@ export class GameScene extends Phaser.Scene {
       log: (msg: string) => ctx.log?.(msg) ?? console.log(msg),
     };
 
+    // Store callbacks reference for mission system
+    this.callbacks = systemsCallbacks;
+
     // Create GameSystems container
     this.systems = new GameSystems(ctx, systemsCallbacks);
+
+    // Set mission system callback for showing mission complete (only once)
+    // Store callback reference for cleanup
+    this.missionCompleteCallback = (
+      result: "success" | "fail",
+      missionId: MissionId
+    ) => {
+      this.showMissionCompleteOverlay(result, missionId);
+    };
+    this.systems.missionSystem.callbacks.showMissionComplete = this.missionCompleteCallback;
 
     // Initialize systems (create overlaps, etc.)
     this.systems.init();
@@ -482,65 +513,45 @@ export class GameScene extends Phaser.Scene {
     this.reloadProgressBar.setScrollFactor(0);
     this.reloadProgressBar.setVisible(false);
 
-    // Стартовый экран: оверлей + title + мерцающий hint
-    this.systems.matchStateSystem.setStarted(false);
-    this.overlaySystem.open("start");
-
-    this.startOverlay = this.add
-      .rectangle(width / 2, height / 2, width, height, 0x000000, 0.94)
-      .setOrigin(0.5, 0.5)
-      .setScrollFactor(0)
-      .setDepth(10000)
-      .setInteractive({ useHandCursor: true });
-
-    this.startTitleText = this.add
-      .text(width / 2, height / 2 - 40, "SWARM RUN", {
-        fontSize: "64px",
-        color: "#ffffff",
-        fontStyle: "bold",
-      })
-      .setOrigin(0.5, 0.5)
-      .setScrollFactor(0)
-      .setDepth(10001);
-
-    this.startHintText = this.add
-      .text(width / 2, height / 2 + 40, "Click to start", {
-        fontSize: "28px",
-        color: "#ffffff",
-      })
-      .setOrigin(0.5, 0.5)
-      .setScrollFactor(0)
-      .setDepth(10001);
-
-    // Мерцание hint
-    this.startHintTween = this.tweens.add({
-      targets: this.startHintText,
-      alpha: 0.35,
-      duration: 700,
-      yoyo: true,
-      repeat: -1,
-      ease: "Sine.easeInOut",
+    // ESC key to return to menu
+    const escKey = this.input.keyboard?.addKey(
+      Phaser.Input.Keyboard.KeyCodes.ESC
+    );
+    escKey?.on("down", () => {
+      this.returnToMenu();
     });
 
-    // Обработчик клика с stopPropagation
-    this.startOverlay.on(
-      "pointerdown",
-      (
-        _pointer: Phaser.Input.Pointer,
-        _lx: number,
-        _ly: number,
-        event: any
-      ) => {
-        // Stop event propagation to prevent gameplay input
-        if (event?.stopPropagation) {
-          event.stopPropagation();
-        }
-        this.startGameFromOverlay();
-      }
-    );
+    // Start game based on mode
+    if (mode === "campaign" && data?.missionId) {
+      this.startCampaignMission(data.missionId);
+    } else {
+      this.startSandboxRun();
+    }
   }
 
   update(time: number) {
+    // Handle mission result overlay (gameplay is paused)
+    if (this.uiState === "mission_result") {
+      if (this.missionCompleteOverlay && this.missionCompleteOverlay.active) {
+        // Enter key acts as Next/Retry
+        if (Phaser.Input.Keyboard.JustDown(this.continueKey)) {
+          this.handleMissionCompleteContinue();
+        }
+      }
+      return; // Don't update gameplay systems
+    }
+
+    // Only update gameplay if playing and not paused
+    if (this.uiState !== "playing" || this.gameplayPaused) {
+      // Handle game over restart even when paused
+      if (this.systems.matchStateSystem.isGameOver()) {
+        if (Phaser.Input.Keyboard.JustDown(this.restartKey)) {
+          this.scene.restart();
+        }
+      }
+      return;
+    }
+
     if (this.systems.matchStateSystem.isGameOver()) {
       if (Phaser.Input.Keyboard.JustDown(this.restartKey)) {
         this.scene.restart();
@@ -548,17 +559,9 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    if (!this.systems.matchStateSystem.isStarted()) {
-      return;
-    }
-
-    if (this.isLevelUpOpen) {
-      return;
-    }
-
     if (this.systems.matchStateSystem.isStageClear()) {
-      // Проверяем Enter для продолжения
-      if (Phaser.Input.Keyboard.JustDown(this.continueKey)) {
+      // Проверяем Enter для продолжения (только в sandbox режиме)
+      if (this.gameMode === "sandbox" && Phaser.Input.Keyboard.JustDown(this.continueKey)) {
         this.continueToNextStage();
       }
       return;
@@ -581,8 +584,8 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
-    // Update all systems via GameSystems container
-    if (this.systems) {
+    // Update all systems via GameSystems container (only if gameplay is active)
+    if (this.systems && !this.gameplayPaused) {
       this.systems.update(time);
     }
 
@@ -639,8 +642,66 @@ export class GameScene extends Phaser.Scene {
     // Делегируем в CombatSystem
     this.combatSystem.onEnemyHitPlayer(enemy);
 
-    if (!this.player.isAlive()) {
-      this.handleGameOver();
+    // Check player death - always check regardless of UI state
+    const hp = this.player?.getHealth?.() ?? 0;
+    if (hp <= 0 || !this.player.isAlive()) {
+      this.handlePlayerDeath();
+    }
+  }
+
+  /**
+   * Handle player death - always called when HP <= 0
+   */
+  private handlePlayerDeath(): void {
+    // Guard: prevent multiple calls
+    if (this.isEnding) {
+      return;
+    }
+    
+    console.log("[DBG] handlePlayerDeath()");
+    this.isEnding = true;
+    
+    // Stop spawn
+    if (this.spawnSystem) {
+      this.spawnSystem.stop();
+    }
+    
+    // Disable input
+    this.input.enabled = false;
+    if (this.input.keyboard) {
+      this.input.keyboard.enabled = false;
+    }
+    
+    // Pause physics
+    this.physics.pause();
+    
+    // Set game over state
+    this.systems.matchStateSystem.setGameOver(true);
+    
+    // In campaign mode, mission system will detect death in next update() call
+    // via getPlayerIsDead() callback and call showMissionComplete with "fail"
+    if (this.gameMode === "campaign" && this.systems.missionStateSystem.isActive()) {
+      // Mission system will detect death in update() and call showMissionComplete
+      // No need to call anything here - just ensure state is set
+    } else {
+      // Sandbox mode - show game over overlay
+      this.overlaySystem.open("gameover");
+      this.stageResultSystem.onMatchEnd(this.time.now);
+      this.printMatchSummary("GAME_OVER");
+      
+      // Create game over text
+      const { width, height } = this.scale;
+      this.gameOverText = this.add.text(
+        width / 2,
+        height / 2,
+        "GAME OVER\nPress R to restart",
+        {
+          fontSize: "32px",
+          color: "#ff5555",
+          align: "center",
+        }
+      );
+      this.gameOverText.setOrigin(0.5, 0.5);
     }
   }
 
@@ -1046,126 +1107,186 @@ export class GameScene extends Phaser.Scene {
     this.buffHudText.setText(lines.join("\n"));
   }
 
+  // handleGameOver is kept for compatibility but delegates to handlePlayerDeath
+  // @deprecated Use handlePlayerDeath directly
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   private handleGameOver() {
-    if (this.systems.matchStateSystem.isGameOver()) {
-      return;
-    }
-
-    this.systems.matchStateSystem.setGameOver(true);
-    this.overlaySystem.open("gameover");
-
-    // Clear buff loot tracking on game over (handled by LootDropSystem.reset())
-
-    // Печатаем статистику при Game Over
-    this.stageResultSystem.onMatchEnd(this.time.now);
-    this.printMatchSummary("GAME_OVER");
-
-    // Останавливаем планировщик спавна
-    this.spawnSystem.stop();
-
-    this.physics.pause();
-
-    const { width, height } = this.scale;
-
-    this.gameOverText = this.add.text(
-      width / 2,
-      height / 2,
-      "GAME OVER\nPress R to restart",
-      {
-        fontSize: "32px",
-        color: "#ff5555",
-        align: "center",
-      }
-    );
-    this.gameOverText.setOrigin(0.5, 0.5);
+    this.handlePlayerDeath();
   }
 
-  private startGameFromOverlay() {
-    if (
-      this.systems.matchStateSystem.isStarted() ||
-      this.systems.matchStateSystem.isGameOver()
-    ) {
-      return;
+  /**
+   * Enter gameplay mode - restore full gameplay functionality
+   */
+  private enterGameplay(): void {
+    console.log("[DBG] enterGameplay()");
+    
+    // Set UI state to playing
+    this.uiState = "playing";
+    
+    // Hide/destroy mission result overlay
+    this.hideMissionCompleteOverlay();
+    
+    // Enable input
+    this.input.enabled = true;
+    if (this.input.keyboard) {
+      this.input.keyboard.enabled = true;
+    }
+    
+    // Resume physics
+    this.physics.resume();
+    
+    // Reset time scale
+    this.time.timeScale = 1;
+    
+    // Unpause gameplay
+    this.setGameplayPaused(false);
+    
+    // Reset ending flag
+    this.isEnding = false;
+  }
+
+  /**
+   * Set UI state (single entry point for state changes)
+   */
+  private setUIState(next: "playing" | "mission_result"): void {
+    const current = this.uiState;
+    if (next === current) {
+      return; // Already in this state
     }
 
-    // Важно: "съесть" клик, чтобы не было выстрела
-    this.input.activePointer.isDown = false;
+    this.callbacks.log?.(`[UI] state=${current} -> ${next}`);
 
-    // Блокируем стрельбу на короткое время после старта
-    this.weaponSystem.setSuppressShootingUntil(this.time.now + 200);
+    // Exit current state
+    switch (current) {
+      case "playing":
+        // Nothing special on exit
+        break;
+      case "mission_result":
+        this.hideMissionCompleteOverlay();
+        break;
+    }
 
-    this.systems.matchStateSystem.setStarted(true);
+    // Enter next state
+    switch (next) {
+      case "playing":
+        this.setGameplayPaused(false);
+        break;
+      case "mission_result":
+        this.setGameplayPaused(true);
+        break;
+    }
+
+    this.uiState = next;
+  }
+
+  /**
+   * Return to menu scene
+   */
+  private returnToMenu(): void {
+    console.log("[GAME] esc -> back to MenuScene (stop GameScene)");
+    // Stop GameScene before starting MenuScene
+    this.scene.stop("GameScene");
+    this.scene.start("MenuScene");
+  }
+
+  /**
+   * Set gameplay paused state
+   */
+  private setGameplayPaused(paused: boolean): void {
+    this.gameplayPaused = paused;
+    if (paused) {
+      this.physics.pause();
+    } else {
+      this.physics.resume();
+    }
+  }
+
+  /**
+   * Common method to reset and start gameplay
+   */
+  private resetAndStartGameplay(): void {
+    // Enter gameplay mode first (restore controls, physics, etc.)
+    this.enterGameplay();
+    
+    // Hide any overlays
     this.overlaySystem.close();
 
-    // Устанавливаем время начала забега
+    // Reset match state
+    this.systems.resetMatch();
+    this.systems.matchStateSystem.setStarted(false);
+    this.systems.matchStateSystem.setGameOver(false);
+    this.systems.matchStateSystem.setStageClear(false);
+
+    // Reset ending flag
+    this.isEnding = false;
+
+    // Reset player
+    this.player.setPosition(this.scale.width / 2, this.scale.height / 2);
+    const playerBody = this.player.body as Phaser.Physics.Arcade.Body;
+    if (playerBody) {
+      playerBody.setVelocity(0, 0);
+    }
+
+    // Clear all enemies
+    this.enemies.clear(true, true);
+
+    // Clear all bullets
+    this.bullets.clear(true, true);
+
+    // Clear all loot
+    this.loot.clear(true, true);
+
+    // Reset UI
+    this.score = 0;
+    this.weaponSwitches = 0;
+    this.level = 1;
+    this.xp = 0;
+    this.updateHealthText();
+    this.scoreText.setText(`Score: ${this.score}`);
+    this.updateXPText();
+
+    // Reset phase
+    this.runStartTime = 0;
+    this.currentPhase = 1;
+  }
+
+  /**
+   * Start sandbox run
+   */
+  private startSandboxRun(): void {
+    console.log("[DBG] startSandboxRun()");
+    this.callbacks.log?.("[GAME] start sandbox mode");
+
+    // Reset and start gameplay (includes enterGameplay())
+    this.resetAndStartGameplay();
+
+    // Start game systems
+    this.systems.matchStateSystem.setStarted(true);
     this.runStartTime = this.time.now;
     this.currentPhase = 1;
-
-    // Инициализируем stage system
     this.stageSystem.start(this.time.now);
-
-    // Обновляем статистику при старте
     this.matchStatsSystem.reset(this.time.now);
+    this.spawnSystem.start(this.time.now);
 
     // Block shooting for short time after start
     this.weaponSystem.setSuppressShootingUntil(this.time.now + 200);
+  }
 
-    // Стартуем стабильный планировщик спавна
-    this.spawnSystem.start(this.time.now);
 
-    // Stage start уже залогирован в callback
-
-    // Опционально: debug текст фазы
-    if (this.debugEnabled) {
-      const settings = this.getPhaseSettings(this.currentPhase);
-      this.phaseText = this.add.text(16, 60, "", {
-        fontSize: "14px",
-        color: "#ffff00",
-      });
-      this.phaseText.setScrollFactor(0);
-      this.phaseText.setText(
-        `PHASE: ${this.currentPhase} | Max: ${settings.maxAliveEnemies} | Delay: ${settings.spawnDelayMs}ms`
-      );
+  /**
+   * Format objective for logging
+   */
+  private formatObjective(objective: { kind: string; [key: string]: unknown }): string {
+    if (objective.kind === "survive") {
+      return `survive(${objective.durationSec}s)`;
     }
-
-    // Выключаем мерцание
-    if (this.startHintTween) {
-      this.startHintTween.stop();
-      this.startHintTween = undefined;
+    if (objective.kind === "kill_count") {
+      return `kill_count(${objective.kills})`;
     }
-
-    // Плавно скрываем overlay + тексты
-    const targets: Phaser.GameObjects.GameObject[] = [];
-    if (this.startOverlay) {
-      targets.push(this.startOverlay);
+    if (objective.kind === "boss") {
+      return `boss(${objective.bossId})`;
     }
-    if (this.startTitleText) {
-      targets.push(this.startTitleText);
-    }
-    if (this.startHintText) {
-      targets.push(this.startHintText);
-    }
-
-    this.tweens.add({
-      targets,
-      alpha: 0,
-      duration: 220,
-      ease: "Sine.easeInOut",
-      onComplete: () => {
-        if (this.startOverlay) {
-          this.startOverlay.destroy();
-          this.startOverlay = undefined;
-        }
-        if (this.startTitleText) {
-          this.startTitleText.destroy();
-          this.startTitleText = undefined;
-        }
-        if (this.startHintText) {
-          this.startHintText.destroy();
-          this.startHintText = undefined;
-        }
-      },
-    });
+    return "unknown";
   }
 
   resetMatchStats(): void {
@@ -1223,6 +1344,12 @@ export class GameScene extends Phaser.Scene {
     // Clear buff loot tracking on stage clear (handled by LootDropSystem)
     const state = this.systems.matchStateSystem;
     if (state.isGameOver() || !state.isStarted() || state.isStageClear()) {
+      return;
+    }
+
+    // In campaign mode, don't show stage clear overlay (mission system handles it)
+    // Perk overlay should never appear in campaign mode
+    if (this.gameMode === "campaign" || this.uiState === "playing") {
       return;
     }
 
@@ -1494,4 +1621,309 @@ export class GameScene extends Phaser.Scene {
 
   // Burst cycle methods removed - now handled by StageSystem
   // applyBurstSpeedToEnemies() moved to EnemySystem.applySpeedMultiplier()
+
+  // ============================================
+  // CAMPAIGN SYSTEM
+  // ============================================
+
+  /**
+   * Start a campaign mission (called from create() with data)
+   */
+  private startCampaignMission(missionId: MissionId): void {
+    const missionDef = MISSIONS_BY_ID.get(missionId);
+    if (!missionDef) {
+      console.error(`[CAMPAIGN] Mission ${missionId} not found`);
+      return;
+    }
+
+    console.log(`[DBG] startCampaignMission mission=${missionId}`);
+    this.callbacks.log?.(
+      `[CAMPAIGN] start mission=${missionId} objective=${this.formatObjective(missionDef.objective)}`
+    );
+
+    // Reset and start gameplay (includes enterGameplay())
+    this.resetAndStartGameplay();
+
+    // Start game systems
+    this.systems.matchStateSystem.setStarted(true);
+    this.runStartTime = this.time.now;
+    this.currentPhase = 1;
+    this.matchStatsSystem.reset(this.time.now);
+
+    // Find chapter for this mission
+    let chapterId: string | null = null;
+    for (const chapterIdCandidate of CAMPAIGN_MAIN.chapters) {
+      const chapterDef = CHAPTERS_BY_ID.get(chapterIdCandidate);
+      if (chapterDef && chapterDef.missions.includes(missionId)) {
+        chapterId = chapterIdCandidate;
+        break;
+      }
+    }
+
+    if (!chapterId) {
+      const firstChapterId = CAMPAIGN_MAIN.chapters[0];
+      if (!firstChapterId) {
+        console.error("[CAMPAIGN] No chapters found");
+        return;
+      }
+      chapterId = firstChapterId;
+    }
+
+    // Start mission (AFTER reset)
+    this.systems.startCampaignMission(missionId, CAMPAIGN_MAIN.id, chapterId);
+
+    // Block shooting for short time after start
+    this.weaponSystem.setSuppressShootingUntil(this.time.now + 200);
+  }
+
+  /**
+   * Show mission complete overlay
+   */
+  private showMissionCompleteOverlay(
+    result: "success" | "fail",
+    missionId: MissionId
+  ): void {
+    // UI state will be set by setUIState, but we need to create overlay first
+    const { width, height } = this.scale;
+    const missionDef = MISSIONS_BY_ID.get(missionId);
+
+    // Hide existing overlay
+    this.hideMissionCompleteOverlay();
+
+    const objects: Phaser.GameObjects.GameObject[] = [];
+
+    // Background
+    const bg = this.add
+      .rectangle(width / 2, height / 2, width, height, 0x000000, 0.9)
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(30000)
+      .setInteractive({ useHandCursor: false });
+
+    objects.push(bg);
+
+    // Title
+    const titleText = result === "success" ? "MISSION COMPLETE" : "MISSION FAILED";
+    const titleColor = result === "success" ? "#00ff00" : "#ff5555";
+    const title = this.add
+      .text(width / 2, height / 2 - 150, titleText, {
+        fontSize: "48px",
+        color: titleColor,
+        fontStyle: "bold",
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(30001);
+
+    objects.push(title);
+
+    // Mission info
+    const missionTitle = missionDef?.title || "Unknown Mission";
+    const missionInfo = this.add
+      .text(width / 2, height / 2 - 80, missionTitle, {
+        fontSize: "24px",
+        color: "#ffffff",
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(30001);
+
+    objects.push(missionInfo);
+
+    // Buttons
+    const buttonY = height / 2 + 20;
+    const buttonSpacing = 60;
+
+    if (result === "success") {
+      // Next Mission button
+      const nextButton = this.add
+        .text(width / 2, buttonY, "Next Mission", {
+          fontSize: "28px",
+          color: "#ffff00",
+          fontStyle: "bold",
+        })
+        .setOrigin(0.5)
+        .setScrollFactor(0)
+        .setDepth(30001)
+        .setInteractive({ useHandCursor: true });
+
+      nextButton.on("pointerover", () => {
+        nextButton.setColor("#ffffff");
+        nextButton.setScale(1.1);
+      });
+      nextButton.on("pointerout", () => {
+        nextButton.setColor("#ffff00");
+        nextButton.setScale(1.0);
+      });
+      nextButton.on("pointerdown", () => {
+        this.handleMissionCompleteContinue("next");
+      });
+
+      objects.push(nextButton);
+    } else {
+      // Retry button
+      const retryButton = this.add
+        .text(width / 2, buttonY, "Retry", {
+          fontSize: "28px",
+          color: "#ffff00",
+          fontStyle: "bold",
+        })
+        .setOrigin(0.5)
+        .setScrollFactor(0)
+        .setDepth(30001)
+        .setInteractive({ useHandCursor: true });
+
+      retryButton.on("pointerover", () => {
+        retryButton.setColor("#ffffff");
+        retryButton.setScale(1.1);
+      });
+      retryButton.on("pointerout", () => {
+        retryButton.setColor("#ffff00");
+        retryButton.setScale(1.0);
+      });
+      retryButton.on("pointerdown", () => {
+        this.handleMissionCompleteContinue("retry");
+      });
+
+      objects.push(retryButton);
+    }
+
+    // Back to missions button
+    const backButton = this.add
+      .text(width / 2, buttonY + buttonSpacing, "Back to Missions", {
+        fontSize: "24px",
+        color: "#888888",
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(30001)
+      .setInteractive({ useHandCursor: true });
+
+    backButton.on("pointerover", () => {
+      backButton.setColor("#aaaaaa");
+      backButton.setScale(1.1);
+    });
+    backButton.on("pointerout", () => {
+      backButton.setColor("#888888");
+      backButton.setScale(1.0);
+    });
+    backButton.on("pointerdown", () => {
+      this.handleMissionCompleteContinue("back");
+    });
+
+    objects.push(backButton);
+
+    // Hint text
+    const hintText = result === "success" ? "(Enter: Next)" : "(Enter: Retry)";
+    const hint = this.add
+      .text(width / 2, buttonY + buttonSpacing + 50, hintText, {
+        fontSize: "18px",
+        color: "#666666",
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(30001);
+
+    objects.push(hint);
+
+    this.missionCompleteOverlay = this.add.container(0, 0, objects);
+    this.missionCompleteOverlay.setDepth(30000);
+    this.missionCompleteOverlay.setScrollFactor(0);
+
+    // Set UI state after overlay is created
+    this.setUIState("mission_result");
+  }
+
+  /**
+   * Hide mission complete overlay
+   */
+  private hideMissionCompleteOverlay(): void {
+    if (this.missionCompleteOverlay) {
+      this.missionCompleteOverlay.destroy(true);
+      this.missionCompleteOverlay = undefined;
+    }
+  }
+
+  /**
+   * Handle mission complete continue (Next/Retry/Back)
+   */
+  private handleMissionCompleteContinue(action?: "next" | "retry" | "back"): void {
+    const result = this.systems.missionStateSystem.getResult();
+    const missionId = this.systems.missionStateSystem.getMissionId();
+
+    // If action not provided, determine from Enter key
+    if (!action) {
+      if (result === "success") {
+        action = "next";
+      } else {
+        action = "retry";
+      }
+    }
+
+    this.hideMissionCompleteOverlay();
+
+    if (action === "back") {
+      this.callbacks.log?.("[CAMPAIGN] back to menu");
+      this.returnToMenu();
+      return;
+    }
+
+    if (!missionId) {
+      return;
+    }
+
+    if (action === "next" && result === "success") {
+      // Next mission - restart scene with next mission
+      const nextMissionId = getNextMissionId(missionId);
+      if (nextMissionId) {
+        console.log(`[DBG] handleMissionCompleteContinue: next mission=${nextMissionId}`);
+        this.callbacks.log?.(`[CAMPAIGN] next mission=${nextMissionId}`);
+        // Stop current scene before starting new one to prevent duplicates
+        this.scene.stop("GameScene");
+        this.scene.start("GameScene", {
+          mode: "campaign",
+          missionId: nextMissionId,
+        });
+      } else {
+        // End of campaign (stub)
+        this.callbacks.log?.(`[CAMPAIGN] campaign complete`);
+        this.returnToMenu();
+      }
+    } else if (action === "retry") {
+      // Retry same mission - restart scene with same mission
+      console.log(`[DBG] handleMissionCompleteContinue: retry mission=${missionId}`);
+      this.callbacks.log?.(`[CAMPAIGN] retry mission=${missionId}`);
+      // Stop current scene before starting new one to prevent duplicates
+      this.scene.stop("GameScene");
+      this.scene.start("GameScene", {
+        mode: "campaign",
+        missionId: missionId,
+      });
+    }
+  }
+
+  /**
+   * Cleanup on scene shutdown/destroy
+   */
+  shutdown(): void {
+    console.log("[DBG] GameScene shutdown - cleaning up");
+    
+    // Remove mission complete callback to prevent duplicates
+    if (this.systems?.missionSystem && this.missionCompleteCallback) {
+      // Set to no-op function instead of undefined to satisfy type
+      this.systems.missionSystem.callbacks.showMissionComplete = () => {};
+      this.missionCompleteCallback = undefined;
+    }
+    
+    // Reset flags
+    this.isEnding = false;
+    this.gameplayPaused = false;
+    this.uiState = "playing";
+    
+    // Hide overlays
+    this.hideMissionCompleteOverlay();
+    if (this.overlaySystem) {
+      this.overlaySystem.close();
+    }
+  }
 }

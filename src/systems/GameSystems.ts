@@ -14,9 +14,12 @@ import { StageResultSystem } from "./StageResultSystem";
 import { SpawnSystem } from "./SpawnSystem";
 import { LootDropSystem } from "./LootDropSystem";
 import { OverlaySystem } from "./OverlaySystem";
+import { MissionStateSystem } from "./MissionStateSystem";
+import { MissionSystem } from "./MissionSystem";
 import { Enemy, EnemyType } from "../entities/Enemy";
 import { PhaseSettings, BurstState } from "./SpawnSystem";
 import type { WeaponId as WeaponConfigId } from "../config/WeaponsConfig";
+import type { MissionId } from "../types/campaign";
 import { GameTuning } from "../config/GameTuning";
 
 /**
@@ -80,6 +83,8 @@ export class GameSystems {
   public readonly spawnSystem: SpawnSystem;
   public readonly lootDropSystem: LootDropSystem;
   public readonly overlaySystem: OverlaySystem;
+  public readonly missionStateSystem: MissionStateSystem;
+  public readonly missionSystem: MissionSystem;
 
   constructor(ctx: GameContext, callbacks: GameSystemsCallbacks) {
     this.ctx = ctx;
@@ -374,6 +379,38 @@ export class GameSystems {
       },
       log: (msg: string) => ctx.log?.(msg),
     });
+
+    // 15. MissionStateSystem (no dependencies)
+    this.missionStateSystem = new MissionStateSystem();
+
+    // 16. MissionSystem (depends on missionStateSystem, matchStatsSystem)
+    this.missionSystem = new MissionSystem(
+      {
+        getTimeNowMs: () => ctx.getTimeNow(),
+        getPlayerIsDead: () => !ctx.player.isAlive(),
+        getKillCount: () => {
+          const summary = this.matchStatsSystem.getSummary();
+          return summary.killsTotal;
+        },
+        pauseGameplay: () => {
+          // Pause physics and stop spawn
+          this.callbacks.pausePhysics();
+          this.spawnSystem.stop();
+        },
+        resumeGameplay: () => {
+          // Resume physics and start spawn
+          this.callbacks.resumePhysics(0);
+          const timeNow = ctx.getTimeNow();
+          this.spawnSystem.start(timeNow);
+        },
+        showMissionComplete: (_result: "success" | "fail", _missionId: MissionId) => {
+          // Delegate to GameScene via callback (will be set in GameScene)
+          // This is a placeholder - actual implementation in GameScene
+        },
+        log: (msg: string) => ctx.log?.(msg),
+      },
+      this.missionStateSystem
+    );
   }
 
   /**
@@ -412,6 +449,8 @@ export class GameSystems {
     this.enemySystem.reset();
     this.projectileSystem.reset();
     this.combatSystem.reset();
+    this.missionSystem.reset();
+    this.missionStateSystem.reset();
     this.callbacks.updatePlayerPickupRadius();
   }
 
@@ -444,5 +483,21 @@ export class GameSystems {
     if (!isStageClear) {
       this.weaponSystem.update();
     }
+
+    // Update mission system (if mission is active)
+    if (this.missionStateSystem.isActive()) {
+      this.missionSystem.update();
+    }
+  }
+
+  /**
+   * Start campaign mission
+   */
+  startCampaignMission(
+    missionId: MissionId,
+    campaignId: string,
+    chapterId: string
+  ): void {
+    this.missionSystem.startMission(missionId, campaignId, chapterId);
   }
 }
