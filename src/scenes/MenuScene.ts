@@ -27,7 +27,6 @@ export class MenuScene extends Phaser.Scene {
   private panel?: Phaser.GameObjects.Container;
   private state: MenuState = "main";
   private clickLocked = false;
-  private spacing = 16;
   private selectedChapter: number = 1;
   private unlockedMissionByChapter: Record<number, number> = { 1: 1 }; // chapter -> highest unlocked mission
   private escKey?: Phaser.Input.Keyboard.Key;
@@ -83,7 +82,20 @@ export class MenuScene extends Phaser.Scene {
     });
 
     // Resize handler
-    this.scale.on("resize", () => this.layout());
+    let resizeLogThrottle = 0;
+    this.scale.on("resize", () => {
+      const w = this.scale.width;
+      const h = this.scale.height;
+      // Throttle resize logs (only log once per resize event)
+      if (resizeLogThrottle === 0) {
+        console.log(`[MENU] resize w=${w} h=${h}`);
+        resizeLogThrottle = 1;
+        this.time.delayedCall(100, () => {
+          resizeLogThrottle = 0;
+        });
+      }
+      this.layout();
+    });
 
     // Initial layout
     this.layout();
@@ -105,14 +117,14 @@ export class MenuScene extends Phaser.Scene {
   private buildUI(): void {
     const { width, height } = this.scale;
 
-    // Root container (centered)
-    this.root = this.add.container(width / 2, height / 2);
+    // Root container (at 0,0 - elements use absolute coords)
+    this.root = this.add.container(0, 0);
     this.root.setDepth(1000);
     this.root.setScrollFactor(0);
 
-    // Overlay (semi-transparent dark background) - added to root, non-interactive
+    // Overlay (semi-transparent dark background) - will be resized by layout
     this.overlay = this.add
-      .rectangle(0, 0, width, height, 0x000000, 0.85)
+      .rectangle(width / 2, height / 2, width, height, 0x000000, 0.85)
       .setOrigin(0.5)
       .setScrollFactor(0);
     this.root.add(this.overlay);
@@ -129,13 +141,13 @@ export class MenuScene extends Phaser.Scene {
   private layout(): void {
     const { width, height } = this.scale;
 
-    // Update root position (center) - overlay is child of root, so it moves with it
-    if (this.root && this.overlay) {
-      this.root.setPosition(width / 2, height / 2);
+    // Update overlay size (root stays at 0,0, panel elements use absolute coords)
+    if (this.overlay) {
       this.overlay.setSize(width, height);
+      this.overlay.setPosition(width / 2, height / 2);
     }
 
-    // Re-render current state
+    // Re-render current state (will use new scale.width/height for positioning)
     this.render();
   }
 
@@ -192,11 +204,17 @@ export class MenuScene extends Phaser.Scene {
       return;
     }
 
-    let y = -120;
+    // Two-zone layout constants
+    const w = this.scale.width;
+    const h = this.scale.height;
+    const cx = w / 2;
+    const headerTop = Math.max(40, h * 0.1);
+    const headerGap = 28;
+    const safeBottom = Math.max(40, h * 0.08);
 
-    // Title
+    // Title in header zone
     const title = this.add
-      .text(0, y, "Swarm Run", {
+      .text(cx, headerTop, "Swarm Run", {
         fontSize: `${this.STYLES.titleSize}px`,
         color: this.STYLES.titleColor,
         fontFamily: "monospace",
@@ -206,7 +224,20 @@ export class MenuScene extends Phaser.Scene {
       .setScrollFactor(0);
 
     this.panel.add(title);
-    y += this.STYLES.titleSize + this.spacing * 2;
+
+    // Content area
+    const contentTop = headerTop + this.STYLES.titleSize / 2 + headerGap;
+    const contentBottom = h - safeBottom;
+    const contentMid = (contentTop + contentBottom) / 2;
+
+    console.log(
+      `[MENU] layout w=${w} h=${h} contentTop=${contentTop} contentBottom=${contentBottom}`
+    );
+
+    // Build content stack
+    const buttonHeight =
+      this.STYLES.buttonSize + this.STYLES.buttonPaddingY * 2;
+    const buttonGap = 22;
 
     // Campaign button
     const campaignBtn = this.createButton({
@@ -216,12 +247,7 @@ export class MenuScene extends Phaser.Scene {
       },
       fontSize: this.STYLES.buttonSize,
     });
-    campaignBtn.setPosition(0, y);
-    this.panel.add(campaignBtn);
-    y +=
-      this.STYLES.buttonSize +
-      this.STYLES.buttonPaddingY * 2 +
-      this.STYLES.buttonSpacing;
+    const campaignHeight = buttonHeight;
 
     // Sandbox button
     const sandboxBtn = this.createButton({
@@ -235,7 +261,21 @@ export class MenuScene extends Phaser.Scene {
       textColor: "#888888",
       textHoverColor: "#aaaaaa",
     });
-    sandboxBtn.setPosition(0, y);
+    const sandboxHeight = buttonHeight;
+
+    // Calculate stack height
+    const stackHeight = campaignHeight + buttonGap + sandboxHeight;
+
+    // Center stack in content area
+    let y = contentMid - stackHeight / 2;
+
+    // Position Campaign button
+    campaignBtn.setPosition(cx, y + campaignHeight / 2);
+    this.panel.add(campaignBtn);
+    y += campaignHeight + buttonGap;
+
+    // Position Sandbox button
+    sandboxBtn.setPosition(cx, y + sandboxHeight / 2);
     this.panel.add(sandboxBtn);
   }
 
@@ -249,11 +289,17 @@ export class MenuScene extends Phaser.Scene {
 
     console.log("[MENU] render campaign");
 
-    let y = -120;
+    // Two-zone layout constants (same as renderMain)
+    const w = this.scale.width;
+    const h = this.scale.height;
+    const cx = w / 2;
+    const headerTop = Math.max(40, h * 0.1);
+    const headerGap = 28;
+    const safeBottom = Math.max(40, h * 0.08);
 
-    // Title (same as main screen)
+    // Title in header zone (same position as main)
     const title = this.add
-      .text(0, y, "Swarm Run", {
+      .text(cx, headerTop, "Swarm Run", {
         fontSize: `${this.STYLES.titleSize}px`,
         color: this.STYLES.titleColor,
         fontFamily: "monospace",
@@ -263,37 +309,42 @@ export class MenuScene extends Phaser.Scene {
       .setScrollFactor(0);
 
     this.panel.add(title);
-    y += this.STYLES.titleSize + this.spacing * 1.5; // Closer to title
 
-    // Subtitle: "Campaign" (smaller and higher)
-    const subtitleSize = Math.round(this.STYLES.buttonSize * 0.75); // ~25% smaller
+    // Content area
+    const contentTop = headerTop + this.STYLES.titleSize / 2 + headerGap;
+    const contentBottom = h - safeBottom;
+    const contentMid = (contentTop + contentBottom) / 2;
+
+    console.log(
+      `[MENU] layout w=${w} h=${h} contentTop=${contentTop} contentBottom=${contentBottom}`
+    );
+
+    // Build content stack
+    const subtitleSize = Math.round(this.STYLES.buttonSize * 0.75);
+    const blockGap = 28;
+
+    // Create subtitle
     const subtitle = this.add
-      .text(0, y, "Campaign", {
+      .text(cx, 0, "Campaign", {
         fontSize: `${subtitleSize}px`,
         color: this.STYLES.subtitleColor,
         fontFamily: "monospace",
       })
       .setOrigin(0.5, 0.5)
       .setScrollFactor(0);
+    const subtitleHeight = subtitleSize;
 
-    this.panel.add(subtitle);
-    y += subtitleSize + this.spacing * 2;
-
-    // Chapters row
+    // Create chapters row
     const chaptersRow = this.renderChaptersRow();
-    chaptersRow.setPosition(0, y);
-    this.panel.add(chaptersRow);
-    y += this.STYLES.buttonSize + this.STYLES.buttonPaddingY * 2 + this.spacing * 2;
+    const chaptersHeight =
+      this.STYLES.buttonSize + this.STYLES.buttonPaddingY * 2;
 
-    // Missions grid
+    // Create missions grid
     const missionsGrid = this.renderMissionGrid();
-    missionsGrid.setPosition(0, y);
-    this.panel.add(missionsGrid);
-    // Calculate grid height: 2 rows of buttons with spacing
-    const gridHeight = (this.STYLES.buttonSize + this.STYLES.buttonPaddingY * 2) * 2 + 12; // 12 is rowSpacing
-    y += gridHeight + this.spacing * 2;
+    const gridHeight =
+      (this.STYLES.buttonSize + this.STYLES.buttonPaddingY * 2) * 2 + 12; // 2 rows + spacing
 
-    // Back button
+    // Create back button
     const backBtn = this.createButton({
       label: "Back",
       action: () => {
@@ -306,7 +357,39 @@ export class MenuScene extends Phaser.Scene {
       textColor: this.STYLES.subtitleColor,
       textHoverColor: "#cccccc",
     });
-    backBtn.setPosition(0, y);
+    const backHeight =
+      this.STYLES.subtitleSize + this.STYLES.buttonPaddingY * 2;
+
+    // Calculate stack height
+    const stackHeight =
+      subtitleHeight +
+      blockGap +
+      chaptersHeight +
+      blockGap +
+      gridHeight +
+      blockGap +
+      backHeight;
+
+    // Center stack in content area
+    let y = contentMid - stackHeight / 2;
+
+    // Position subtitle
+    subtitle.setPosition(cx, y + subtitleHeight / 2);
+    this.panel.add(subtitle);
+    y += subtitleHeight + blockGap;
+
+    // Position chapters row
+    chaptersRow.setPosition(cx, y + chaptersHeight / 2);
+    this.panel.add(chaptersRow);
+    y += chaptersHeight + blockGap;
+
+    // Position missions grid
+    missionsGrid.setPosition(cx, y + gridHeight / 2);
+    this.panel.add(missionsGrid);
+    y += gridHeight + blockGap;
+
+    // Position back button
+    backBtn.setPosition(cx, y + backHeight / 2);
     this.panel.add(backBtn);
   }
 
@@ -330,7 +413,8 @@ export class MenuScene extends Phaser.Scene {
     const buttonWidth = tempText.width + this.STYLES.buttonPaddingX * 2;
     tempText.destroy();
 
-    const totalWidth = buttonCount * buttonWidth + (buttonCount - 1) * buttonSpacing;
+    const totalWidth =
+      buttonCount * buttonWidth + (buttonCount - 1) * buttonSpacing;
     const startX = -totalWidth / 2 + buttonWidth / 2;
 
     // Create chapter buttons
@@ -340,24 +424,19 @@ export class MenuScene extends Phaser.Scene {
 
       const x = startX + (i - 1) * (buttonWidth + buttonSpacing);
 
-      const chapterBtn = this.createMenuButton(
-        `${buttonLabel} ${i}`,
-        x,
-        0,
-        {
-          fontSize: buttonFontSize,
-          enabled: isEnabled,
-          selected: isSelected,
-          action: () => {
-            if (isEnabled) {
-              this.selectedChapter = i;
-              console.log(`[MENU] click chapter=${i}`);
-              // Re-render to update selection
-              this.render();
-            }
-          },
-        }
-      );
+      const chapterBtn = this.createMenuButton(`${buttonLabel} ${i}`, x, 0, {
+        fontSize: buttonFontSize,
+        enabled: isEnabled,
+        selected: isSelected,
+        action: () => {
+          if (isEnabled) {
+            this.selectedChapter = i;
+            console.log(`[MENU] click chapter=${i}`);
+            // Re-render to update selection
+            this.render();
+          }
+        },
+      });
 
       container.add(chapterBtn);
     }
@@ -402,7 +481,8 @@ export class MenuScene extends Phaser.Scene {
     tempText.destroy();
 
     // Calculate row width
-    const rowWidth = missionsPerRow * buttonWidth + (missionsPerRow - 1) * buttonSpacing;
+    const rowWidth =
+      missionsPerRow * buttonWidth + (missionsPerRow - 1) * buttonSpacing;
     const startX = -rowWidth / 2 + buttonWidth / 2;
 
     let maxY = 0;
@@ -413,29 +493,34 @@ export class MenuScene extends Phaser.Scene {
       const col = (missionIndex - 1) % missionsPerRow;
 
       const x = startX + col * (buttonWidth + buttonSpacing);
-      const y = row * (this.STYLES.buttonSize + this.STYLES.buttonPaddingY * 2 + rowSpacing);
+      const y =
+        row *
+        (this.STYLES.buttonSize + this.STYLES.buttonPaddingY * 2 + rowSpacing);
 
-      const isUnlocked = this.isMissionUnlocked(this.selectedChapter, missionIndex);
-
-      const missionBtn = this.createMenuButton(
-        `${missionIndex}`,
-        x,
-        y,
-        {
-          fontSize: buttonFontSize,
-          enabled: isUnlocked,
-          selected: false, // Missions are not selected, only chapters
-          action: () => {
-            if (isUnlocked) {
-              console.log(`[MENU] click mission chapter=${this.selectedChapter} mission=${missionIndex} (start)`);
-              this.startCampaignMission(this.selectedChapter, missionIndex);
-            }
-          },
-        }
+      const isUnlocked = this.isMissionUnlocked(
+        this.selectedChapter,
+        missionIndex
       );
 
+      const missionBtn = this.createMenuButton(`${missionIndex}`, x, y, {
+        fontSize: buttonFontSize,
+        enabled: isUnlocked,
+        selected: false, // Missions are not selected, only chapters
+        action: () => {
+          if (isUnlocked) {
+            console.log(
+              `[MENU] click mission chapter=${this.selectedChapter} mission=${missionIndex} (start)`
+            );
+            this.startCampaignMission(this.selectedChapter, missionIndex);
+          }
+        },
+      });
+
       container.add(missionBtn);
-      maxY = Math.max(maxY, y + this.STYLES.buttonSize + this.STYLES.buttonPaddingY * 2);
+      maxY = Math.max(
+        maxY,
+        y + this.STYLES.buttonSize + this.STYLES.buttonPaddingY * 2
+      );
     }
 
     // Set container height for positioning
@@ -553,30 +638,38 @@ export class MenuScene extends Phaser.Scene {
       });
 
       // Click handler
-      container.on("pointerdown", (_pointer: Phaser.Input.Pointer, _localX: number, _localY: number, event: any) => {
-        if (event?.stopPropagation) {
-          event.stopPropagation();
+      container.on(
+        "pointerdown",
+        (
+          _pointer: Phaser.Input.Pointer,
+          _localX: number,
+          _localY: number,
+          event: any
+        ) => {
+          if (event?.stopPropagation) {
+            event.stopPropagation();
+          }
+
+          if (this.clickLocked) {
+            return;
+          }
+
+          this.lockClicks(180);
+
+          // Press animation
+          this.tweens.add({
+            targets: container,
+            scaleX: 0.98,
+            scaleY: 0.98,
+            duration: 50,
+            yoyo: true,
+            ease: "Power2",
+            onComplete: () => {
+              action();
+            },
+          });
         }
-
-        if (this.clickLocked) {
-          return;
-        }
-
-        this.lockClicks(180);
-
-        // Press animation
-        this.tweens.add({
-          targets: container,
-          scaleX: 0.98,
-          scaleY: 0.98,
-          duration: 50,
-          yoyo: true,
-          ease: "Power2",
-          onComplete: () => {
-            action();
-          },
-        });
-      });
+      );
     } else {
       // Disabled: lower alpha and no interaction
       container.setAlpha(0.4);
@@ -585,7 +678,6 @@ export class MenuScene extends Phaser.Scene {
 
     return container;
   }
-
 
   /**
    * Create a button (UI toolkit)
@@ -789,5 +881,4 @@ export class MenuScene extends Phaser.Scene {
     this.scene.stop("MenuScene");
     this.scene.start("GameScene", { mode: "sandbox" });
   }
-
 }

@@ -179,7 +179,10 @@ export class GameScene extends Phaser.Scene {
   private missionCompleteOverlay?: Phaser.GameObjects.Container;
   private gameplayPaused = false; // Gameplay starts immediately when scene starts
   private isEnding = false; // Guard to prevent multiple death handlers
-  private missionCompleteCallback?: (result: "success" | "fail", missionId: MissionId) => void;
+  private missionCompleteCallback?: (
+    result: "success" | "fail",
+    missionId: MissionId
+  ) => void;
 
   // Weapon-drop and buff loot tracking moved to LootDropSystem
 
@@ -434,7 +437,8 @@ export class GameScene extends Phaser.Scene {
     ) => {
       this.showMissionCompleteOverlay(result, missionId);
     };
-    this.systems.missionSystem.callbacks.showMissionComplete = this.missionCompleteCallback;
+    this.systems.missionSystem.callbacks.showMissionComplete =
+      this.missionCompleteCallback;
 
     // Initialize systems (create overlaps, etc.)
     this.systems.init();
@@ -561,7 +565,10 @@ export class GameScene extends Phaser.Scene {
 
     if (this.systems.matchStateSystem.isStageClear()) {
       // Проверяем Enter для продолжения (только в sandbox режиме)
-      if (this.gameMode === "sandbox" && Phaser.Input.Keyboard.JustDown(this.continueKey)) {
+      if (
+        this.gameMode === "sandbox" &&
+        Phaser.Input.Keyboard.JustDown(this.continueKey)
+      ) {
         this.continueToNextStage();
       }
       return;
@@ -657,30 +664,33 @@ export class GameScene extends Phaser.Scene {
     if (this.isEnding) {
       return;
     }
-    
+
     console.log("[DBG] handlePlayerDeath()");
     this.isEnding = true;
-    
+
     // Stop spawn
     if (this.spawnSystem) {
       this.spawnSystem.stop();
     }
-    
+
     // Disable input
     this.input.enabled = false;
     if (this.input.keyboard) {
       this.input.keyboard.enabled = false;
     }
-    
+
     // Pause physics
     this.physics.pause();
-    
+
     // Set game over state
     this.systems.matchStateSystem.setGameOver(true);
-    
+
     // In campaign mode, mission system will detect death in next update() call
     // via getPlayerIsDead() callback and call showMissionComplete with "fail"
-    if (this.gameMode === "campaign" && this.systems.missionStateSystem.isActive()) {
+    if (
+      this.gameMode === "campaign" &&
+      this.systems.missionStateSystem.isActive()
+    ) {
       // Mission system will detect death in update() and call showMissionComplete
       // No need to call anything here - just ensure state is set
     } else {
@@ -688,7 +698,7 @@ export class GameScene extends Phaser.Scene {
       this.overlaySystem.open("gameover");
       this.stageResultSystem.onMatchEnd(this.time.now);
       this.printMatchSummary("GAME_OVER");
-      
+
       // Create game over text
       const { width, height } = this.scale;
       this.gameOverText = this.add.text(
@@ -1119,28 +1129,28 @@ export class GameScene extends Phaser.Scene {
    */
   private enterGameplay(): void {
     console.log("[DBG] enterGameplay()");
-    
+
     // Set UI state to playing
     this.uiState = "playing";
-    
+
     // Hide/destroy mission result overlay
     this.hideMissionCompleteOverlay();
-    
+
     // Enable input
     this.input.enabled = true;
     if (this.input.keyboard) {
       this.input.keyboard.enabled = true;
     }
-    
+
     // Resume physics
     this.physics.resume();
-    
+
     // Reset time scale
     this.time.timeScale = 1;
-    
+
     // Unpause gameplay
     this.setGameplayPaused(false);
-    
+
     // Reset ending flag
     this.isEnding = false;
   }
@@ -1207,7 +1217,7 @@ export class GameScene extends Phaser.Scene {
   private resetAndStartGameplay(): void {
     // Enter gameplay mode first (restore controls, physics, etc.)
     this.enterGameplay();
-    
+
     // Hide any overlays
     this.overlaySystem.close();
 
@@ -1272,11 +1282,13 @@ export class GameScene extends Phaser.Scene {
     this.weaponSystem.setSuppressShootingUntil(this.time.now + 200);
   }
 
-
   /**
    * Format objective for logging
    */
-  private formatObjective(objective: { kind: string; [key: string]: unknown }): string {
+  private formatObjective(objective: {
+    kind: string;
+    [key: string]: unknown;
+  }): string {
     if (objective.kind === "survive") {
       return `survive(${objective.durationSec}s)`;
     }
@@ -1638,7 +1650,9 @@ export class GameScene extends Phaser.Scene {
 
     console.log(`[DBG] startCampaignMission mission=${missionId}`);
     this.callbacks.log?.(
-      `[CAMPAIGN] start mission=${missionId} objective=${this.formatObjective(missionDef.objective)}`
+      `[CAMPAIGN] start mission=${missionId} objective=${this.formatObjective(
+        missionDef.objective
+      )}`
     );
 
     // Reset and start gameplay (includes enterGameplay())
@@ -1703,7 +1717,8 @@ export class GameScene extends Phaser.Scene {
     objects.push(bg);
 
     // Title
-    const titleText = result === "success" ? "MISSION COMPLETE" : "MISSION FAILED";
+    const titleText =
+      result === "success" ? "MISSION COMPLETE" : "MISSION FAILED";
     const titleColor = result === "success" ? "#00ff00" : "#ff5555";
     const title = this.add
       .text(width / 2, height / 2 - 150, titleText, {
@@ -1847,7 +1862,9 @@ export class GameScene extends Phaser.Scene {
   /**
    * Handle mission complete continue (Next/Retry/Back)
    */
-  private handleMissionCompleteContinue(action?: "next" | "retry" | "back"): void {
+  private handleMissionCompleteContinue(
+    action?: "next" | "retry" | "back"
+  ): void {
     const result = this.systems.missionStateSystem.getResult();
     const missionId = this.systems.missionStateSystem.getMissionId();
 
@@ -1876,7 +1893,9 @@ export class GameScene extends Phaser.Scene {
       // Next mission - restart scene with next mission
       const nextMissionId = getNextMissionId(missionId);
       if (nextMissionId) {
-        console.log(`[DBG] handleMissionCompleteContinue: next mission=${nextMissionId}`);
+        console.log(
+          `[DBG] handleMissionCompleteContinue: next mission=${nextMissionId}`
+        );
         this.callbacks.log?.(`[CAMPAIGN] next mission=${nextMissionId}`);
         // Stop current scene before starting new one to prevent duplicates
         this.scene.stop("GameScene");
@@ -1891,7 +1910,9 @@ export class GameScene extends Phaser.Scene {
       }
     } else if (action === "retry") {
       // Retry same mission - restart scene with same mission
-      console.log(`[DBG] handleMissionCompleteContinue: retry mission=${missionId}`);
+      console.log(
+        `[DBG] handleMissionCompleteContinue: retry mission=${missionId}`
+      );
       this.callbacks.log?.(`[CAMPAIGN] retry mission=${missionId}`);
       // Stop current scene before starting new one to prevent duplicates
       this.scene.stop("GameScene");
@@ -1907,19 +1928,19 @@ export class GameScene extends Phaser.Scene {
    */
   shutdown(): void {
     console.log("[DBG] GameScene shutdown - cleaning up");
-    
+
     // Remove mission complete callback to prevent duplicates
     if (this.systems?.missionSystem && this.missionCompleteCallback) {
       // Set to no-op function instead of undefined to satisfy type
       this.systems.missionSystem.callbacks.showMissionComplete = () => {};
       this.missionCompleteCallback = undefined;
     }
-    
+
     // Reset flags
     this.isEnding = false;
     this.gameplayPaused = false;
     this.uiState = "playing";
-    
+
     // Hide overlays
     this.hideMissionCompleteOverlay();
     if (this.overlaySystem) {
