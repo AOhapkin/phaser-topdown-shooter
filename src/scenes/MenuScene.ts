@@ -34,7 +34,7 @@ export class MenuScene extends Phaser.Scene {
 
   // Style constants
   private readonly STYLES = {
-    titleSize: 60,
+    titleSize: 100, // Increased from 60 (~33% larger)
     buttonSize: 32,
     subtitleSize: 18,
     buttonPaddingX: 18,
@@ -175,6 +175,28 @@ export class MenuScene extends Phaser.Scene {
   }
 
   /**
+   * Fit text to maximum width by adjusting fontSize
+   */
+  private fitTextToWidth(
+    text: Phaser.GameObjects.Text,
+    maxWidth: number,
+    minSize = 40
+  ): number {
+    let size =
+      typeof text.style.fontSize === "number"
+        ? text.style.fontSize
+        : parseInt(String(text.style.fontSize), 10);
+    if (!Number.isFinite(size)) size = 110;
+
+    while (text.width > maxWidth && size > minSize) {
+      size -= 2;
+      text.setFontSize(size);
+    }
+
+    return size;
+  }
+
+  /**
    * Render current state (clears panel and rebuilds)
    */
   private render(): void {
@@ -208,14 +230,15 @@ export class MenuScene extends Phaser.Scene {
     const w = this.scale.width;
     const h = this.scale.height;
     const cx = w / 2;
-    const headerTop = Math.max(40, h * 0.1);
+    const maxTitleWidth = w * 0.8;
+    const headerTop = Math.max(200, h * 0.20);
     const headerGap = 28;
     const safeBottom = Math.max(40, h * 0.08);
 
-    // Title in header zone
+    // Title in header zone - start with large fontSize, then fit to width
     const title = this.add
       .text(cx, headerTop, "Swarm Run", {
-        fontSize: `${this.STYLES.titleSize}px`,
+        fontSize: "110px",
         color: this.STYLES.titleColor,
         fontFamily: "monospace",
         fontStyle: "bold",
@@ -223,10 +246,19 @@ export class MenuScene extends Phaser.Scene {
       .setOrigin(0.5, 0.5)
       .setScrollFactor(0);
 
+    // Fit title to max width
+    const titleFontSize = this.fitTextToWidth(title, maxTitleWidth, 40);
+    console.log(
+      `[MENU] title fit fontSize=${titleFontSize} titleW=${Math.round(
+        title.width
+      )} maxW=${Math.round(maxTitleWidth)}`
+    );
+
     this.panel.add(title);
 
-    // Content area
-    const contentTop = headerTop + this.STYLES.titleSize / 2 + headerGap;
+    // Content area - use actual title height (after fitting)
+    const titleHeight = title.displayHeight;
+    const contentTop = headerTop + titleHeight / 2 + headerGap;
     const contentBottom = h - safeBottom;
     const contentMid = (contentTop + contentBottom) / 2;
 
@@ -237,46 +269,19 @@ export class MenuScene extends Phaser.Scene {
     // Build content stack
     const buttonHeight =
       this.STYLES.buttonSize + this.STYLES.buttonPaddingY * 2;
-    const buttonGap = 22;
+    const stackHeight = buttonHeight;
+    const y = contentMid - stackHeight / 2;
 
-    // Campaign button
-    const campaignBtn = this.createButton({
-      label: "Campaign",
-      action: () => {
-        this.setState("campaign");
-      },
-      fontSize: this.STYLES.buttonSize,
-    });
-    const campaignHeight = buttonHeight;
-
-    // Sandbox button
-    const sandboxBtn = this.createButton({
-      label: "Sandbox",
+    // Start game button (sandbox for now)
+    const startBtn = this.createButton({
+      label: "Start game",
       action: () => {
         this.startSandbox();
       },
       fontSize: this.STYLES.buttonSize,
-      color: 0x1a1a1a,
-      hoverColor: 0x2a2a2a,
-      textColor: "#888888",
-      textHoverColor: "#aaaaaa",
     });
-    const sandboxHeight = buttonHeight;
-
-    // Calculate stack height
-    const stackHeight = campaignHeight + buttonGap + sandboxHeight;
-
-    // Center stack in content area
-    let y = contentMid - stackHeight / 2;
-
-    // Position Campaign button
-    campaignBtn.setPosition(cx, y + campaignHeight / 2);
-    this.panel.add(campaignBtn);
-    y += campaignHeight + buttonGap;
-
-    // Position Sandbox button
-    sandboxBtn.setPosition(cx, y + sandboxHeight / 2);
-    this.panel.add(sandboxBtn);
+    startBtn.setPosition(cx, y + buttonHeight / 2);
+    this.panel.add(startBtn);
   }
 
   /**
@@ -293,14 +298,15 @@ export class MenuScene extends Phaser.Scene {
     const w = this.scale.width;
     const h = this.scale.height;
     const cx = w / 2;
-    const headerTop = Math.max(40, h * 0.1);
+    const maxTitleWidth = w * 0.8;
+    const headerTop = Math.max(200, h * 0.20);
     const headerGap = 28;
     const safeBottom = Math.max(40, h * 0.08);
 
-    // Title in header zone (same position as main)
+    // Title in header zone - start with large fontSize, then fit to width
     const title = this.add
       .text(cx, headerTop, "Swarm Run", {
-        fontSize: `${this.STYLES.titleSize}px`,
+        fontSize: "110px",
         color: this.STYLES.titleColor,
         fontFamily: "monospace",
         fontStyle: "bold",
@@ -308,15 +314,24 @@ export class MenuScene extends Phaser.Scene {
       .setOrigin(0.5, 0.5)
       .setScrollFactor(0);
 
+    // Fit title to max width
+    const titleFontSize = this.fitTextToWidth(title, maxTitleWidth, 40);
+    console.log(
+      `[MENU] title fit fontSize=${titleFontSize} titleW=${Math.round(
+        title.width
+      )} maxW=${Math.round(maxTitleWidth)}`
+    );
+
     this.panel.add(title);
 
-    // Content area
-    const contentTop = headerTop + this.STYLES.titleSize / 2 + headerGap;
+    // Content area - use actual title height (after fitting)
+    const titleHeight = title.displayHeight;
+    const contentTop = headerTop + titleHeight / 2 + headerGap;
     const contentBottom = h - safeBottom;
     const contentMid = (contentTop + contentBottom) / 2;
 
     console.log(
-      `[MENU] layout w=${w} h=${h} contentTop=${contentTop} contentBottom=${contentBottom}`
+      `[MENU] layout w=${w} h=${h} headerTop=${headerTop} titleH=${titleHeight} contentTop=${contentTop}`
     );
 
     // Build content stack

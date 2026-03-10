@@ -26,6 +26,6 @@ const config: Phaser.Types.Core.GameConfig = {
   scene: [MenuScene, GameScene], // MenuScene is the starting scene
 };
 
-const game = new Phaser.Game(config);
+new Phaser.Game(config);
 console.log(`[BOOT] scale mode=RESIZE base=${designWidth}x${designHeight}`);
 

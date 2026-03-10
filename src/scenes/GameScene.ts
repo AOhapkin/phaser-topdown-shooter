@@ -1117,13 +1117,6 @@ export class GameScene extends Phaser.Scene {
     this.buffHudText.setText(lines.join("\n"));
   }
 
-  // handleGameOver is kept for compatibility but delegates to handlePlayerDeath
-  // @deprecated Use handlePlayerDeath directly
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  private handleGameOver() {
-    this.handlePlayerDeath();
-  }
-
   /**
    * Enter gameplay mode - restore full gameplay functionality
    */
