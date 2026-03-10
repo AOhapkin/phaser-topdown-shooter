@@ -1,0 +1,1 @@
+Top-down 2D browser shooter built as an interactive web game. Includes player movement, enemy combat, and real-time gameplay logic. Stack: TypeScript, Phaser, Vite. [Live Demo](https://phaser-topdown-shooter.vercel.app/)
